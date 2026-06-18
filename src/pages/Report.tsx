@@ -1,13 +1,13 @@
 import { useStore } from '@/store/useStore'
 import { useParams, useNavigate } from 'react-router-dom'
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import {
   ArrowLeft, FileText, CheckSquare, Square, Image,
   MessageSquare, Shield, Lightbulb, Download, Printer,
-  ChevronUp, ChevronDown,
+  ChevronUp, ChevronDown, Lock, Edit2,
 } from 'lucide-react'
-import type { ReportMaterial, MaterialType, Project, TimelineEvent, OpinionItem, RoleType } from '@/types'
-import { MATERIAL_TYPE_LABELS, ROLE_LABELS } from '@/types'
+import type { ReportMaterial, MaterialType, Project, TimelineEvent, OpinionItem, RoleType, ReportTemplateType, ReportTemplateSection } from '@/types'
+import { MATERIAL_TYPE_LABELS, ROLE_LABELS, REPORT_TEMPLATES, REPORT_TEMPLATE_LABELS } from '@/types'
 
 const TYPE_COLORS: Record<MaterialType, string> = {
   typical_post: 'bg-accent/20 text-accent',
@@ -23,7 +23,7 @@ const TYPE_BORDER: Record<MaterialType, string> = {
   typical_post: 'border-accent/50', spread_screenshot: 'border-ferment/50',
   action_taken: 'border-success/50', conclusion: 'border-cooldown/50',
 }
-const NUMERALS = ['一', '二', '三', '四', '五']
+const NUMERALS = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十']
 
 function fmtShort(iso: string): string {
   const d = new Date(iso)
@@ -54,28 +54,6 @@ function buildOpBullets(opinions: OpinionItem[]): string[] {
   })
   return out
 }
-function buildExport(p: Project, sel: ReportMaterial[], evts: TimelineEvent[], ops: OpinionItem[], gen: boolean, at: string|null): string {
-  const g: Record<MaterialType, ReportMaterial[]> = { typical_post:[], spread_screenshot:[], action_taken:[], conclusion:[] }
-  sel.forEach(m => g[m.type].push(m))
-  const L: string[] = [], evo = [...g.typical_post, ...g.spread_screenshot]
-  L.push(`${p.name}\n`); L.push('一、事件概述'); L.push(buildSummary(p, evts)); L.push('')
-  L.push('二、舆情演化过程')
-  if(evo.length) evo.forEach(m => L.push(`- ${gen?`${m.title}：${m.content}`:m.title}`))
-  else L.push('（暂无素材）')
-  L.push(''); L.push('三、各方观点')
-  const ob = buildOpBullets(ops)
-  if(ob.length) ob.forEach(b => L.push(`- ${b}`))
-  else L.push('（暂无观点数据）')
-  L.push(''); L.push('四、处置评估')
-  if(g.action_taken.length) g.action_taken.forEach(m => L.push(`- ${gen?`${m.title}：${m.content}`:m.title}`))
-  else L.push('（暂无素材）')
-  L.push(''); L.push('五、改进建议')
-  if(g.conclusion.length) g.conclusion.forEach(m => L.push(`- ${gen?`${m.title}：${m.content}`:m.title}`))
-  else L.push('（暂无素材）')
-  L.push(''); const ts = at ?? new Date().toISOString()
-  L.push('---'); L.push(`生成时间：${fmtFull(ts)}`)
-  return L.join('\n')
-}
 
 export default function Report() {
   const { id } = useParams<{ id: string }>()
@@ -83,53 +61,151 @@ export default function Report() {
   const [isGen, setIsGen] = useState(false)
   const [genAt, setGenAt] = useState<string|null>(null)
   const [toast, setToast] = useState<string|null>(null)
+  const [draftNotice, setDraftNotice] = useState(false)
+  const toastTimer = useRef<number|null>(null)
 
-  const projects = useStore(s=>s.projects)
   const rms = useStore(s=>s.reportMaterials)
   const tes = useStore(s=>s.timelineEvents)
   const ois = useStore(s=>s.opinionItems)
+  const currentTemplate = useStore(s=>s.currentReportTemplate)
   const togSel = useStore(s=>s.toggleMaterialSelection)
+  const setMatSel = useStore(s=>s.setMaterialSelected)
   const swap = useStore(s=>s.swapMaterialOrder)
   const mark = useStore(s=>s.markReportGenerated)
+  const setTemplate = useStore(s=>s.setCurrentReportTemplate)
+  const saveDraft = useStore(s=>s.saveReportDraft)
+  const setDraftId = useStore(s=>s.setCurrentDraftId)
+  const getDraftByProj = useStore(s=>s.getDraftByProject)
+  const getProj = useStore(s=>s.getProjectById)
 
-  const project = useMemo(()=>projects.find(p=>p.id===id), [projects, id])
+  const project = useMemo(()=>getProj(id??''), [getProj, id])
   const materials = useMemo(()=>rms.filter(m=>m.projectId===id).sort((a,b)=>a.sortOrder-b.sortOrder), [rms, id])
   const events = useMemo(()=>tes.filter(e=>e.projectId===id), [tes, id])
   const opinions = useMemo(()=>ois.filter(o=>o.projectId===id), [ois, id])
   const sel = useMemo(()=>materials.filter(m=>m.selected), [materials])
-  const gs = useMemo(()=>{
-    const r: Record<MaterialType, ReportMaterial[]> = { typical_post:[], spread_screenshot:[], action_taken:[], conclusion:[] }
-    sel.forEach(m => r[m.type].push(m))
-    return r
-  }, [sel])
+  const template = useMemo(()=>currentTemplate, [currentTemplate])
+  const sections = useMemo(()=>REPORT_TEMPLATES[template], [template])
+
   const esum = useMemo(()=>(project?buildSummary(project, events):''), [project, events])
   const ob = useMemo(()=>buildOpBullets(opinions), [opinions])
 
-  useEffect(()=>{ if(!toast) return; const t=setTimeout(()=>setToast(null),2000); return ()=>clearTimeout(t) }, [toast])
+  const sects = useMemo(()=>{
+    return sections.map((sec: ReportTemplateSection, idx: number) => {
+      const mats = sec.materialTypes.length > 0
+        ? sel.filter(m => sec.materialTypes.includes(m.type))
+        : []
+      let sum: string | null = null
+      let bulls: string[] = []
+      if (sec.autoContent === 'summary') sum = esum
+      if (sec.autoContent === 'stakeholder') bulls = ob
+      let col = 'border-dark-400'
+      if (sec.materialTypes.includes('typical_post') || sec.materialTypes.includes('spread_screenshot')) col = 'border-ferment'
+      if (sec.materialTypes.includes('action_taken')) col = 'border-success'
+      if (sec.materialTypes.includes('conclusion')) col = 'border-cooldown'
+      if (sec.autoContent === 'summary') col = 'border-accent'
+      return { t: sec.title, mats, col, sum, bulls, idx }
+    })
+  }, [sections, sel, esum, ob])
 
-  const onGen = () => { mark(); const ts = new Date().toISOString(); setIsGen(true); setGenAt(ts) }
-  const onReset = () => { setIsGen(false); setGenAt(null) }
+  const buildExportText = useMemo(() => {
+    if (!project) return ''
+    const L: string[] = []
+    L.push(project.name)
+    L.push('')
+    if (sel.length === 0 && !isGen) {
+      L.push('暂无选中素材')
+      return L.join('\n')
+    }
+    sects.forEach((s, i) => {
+      L.push(`${NUMERALS[i]}、${s.t}`)
+      if (s.sum) {
+        L.push(s.sum)
+      } else if (s.bulls.length > 0) {
+        s.bulls.forEach(b => L.push(`- ${b}`))
+      } else if (s.mats.length > 0) {
+        s.mats.forEach(m => {
+          if (isGen) {
+            L.push(`- ${m.title}：${m.content}`)
+          } else {
+            L.push(`- ${m.title}`)
+          }
+        })
+      } else {
+        L.push('（暂无内容）')
+      }
+      L.push('')
+    })
+    const ts = genAt ?? new Date().toISOString()
+    L.push('---')
+    L.push(`生成时间：${fmtFull(ts)}`)
+    return L.join('\n')
+  }, [project, sel, isGen, sects, genAt])
+
+  useEffect(()=>{
+    if(!toast) return
+    if(toastTimer.current) clearTimeout(toastTimer.current)
+    toastTimer.current = window.setTimeout(()=>setToast(null),2500)
+    return ()=>{ if(toastTimer.current) clearTimeout(toastTimer.current) }
+  }, [toast])
+
+  useEffect(()=>{
+    if(!id) return
+    const draft = getDraftByProj(id)
+    if(draft) {
+      setIsGen(true)
+      setGenAt(draft.generatedAt)
+      setTemplate(draft.template)
+      materials.forEach(m => {
+        const shouldSelect = draft.materialIds.includes(m.id)
+        if(m.selected !== shouldSelect) setMatSel(m.id, shouldSelect)
+      })
+      setDraftNotice(true)
+    }
+  }, [id])
+
+  const onTemplateChange = (t: ReportTemplateType) => {
+    if(t === template) return
+    setTemplate(t)
+    setToast(`已切换至${REPORT_TEMPLATE_LABELS[t]}模板，素材已自动归类`)
+  }
+
+  const onGen = () => {
+    if(!project || !id) return
+    mark()
+    const ts = new Date().toISOString()
+    const draftId = saveDraft({
+      projectId: id,
+      template,
+      generatedAt: ts,
+      outlineText: buildExportText,
+      materialIds: sel.map(m => m.id),
+    })
+    setDraftId(draftId)
+    setIsGen(true)
+    setGenAt(ts)
+    setDraftNotice(false)
+  }
+
+  const onReset = () => {
+    setDraftId(null)
+    setIsGen(false)
+    setGenAt(null)
+    setDraftNotice(false)
+  }
+
   const needEdit = () => { setToast('请点击重新编辑以修改素材') }
   const onTog = (mid: string) => { if(isGen) { needEdit(); return } togSel(mid) }
   const onUp = (i: number) => { if(i<=0||isGen) { if(isGen) needEdit(); return } swap(materials[i].id, materials[i-1].id) }
   const onDn = (i: number) => { if(i>=materials.length-1||isGen) { if(isGen) needEdit(); return } swap(materials[i].id, materials[i+1].id) }
+
   const onExp = () => {
     if(!project) return
-    const txt = buildExport(project, sel, events, opinions, isGen, genAt)
-    const blob = new Blob([txt], { type:'text/plain;charset=utf-8' })
+    const blob = new Blob([buildExportText], { type:'text/plain;charset=utf-8' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url; a.download = `${project.name}.txt`; a.click()
     URL.revokeObjectURL(url)
   }
-
-  const sects = useMemo(()=>[
-    { t:'事件概述', mats:[] as ReportMaterial[], col:'border-accent', sum:esum, bulls:[] as string[] },
-    { t:'舆情演化过程', mats:[...gs.typical_post, ...gs.spread_screenshot], col:'border-ferment', sum:null, bulls:[] as string[] },
-    { t:'各方观点', mats:[] as ReportMaterial[], col:'border-dark-400', sum:null, bulls:ob },
-    { t:'处置评估', mats:gs.action_taken, col:'border-success', sum:null, bulls:[] as string[] },
-    { t:'改进建议', mats:gs.conclusion, col:'border-cooldown', sum:null, bulls:[] as string[] },
-  ], [gs, esum, ob])
 
   if(!project) return <div className="flex h-screen items-center justify-center bg-dark-900 text-dark-300">项目不存在</div>
 
@@ -140,9 +216,33 @@ export default function Report() {
         <FileText size={20} className="text-accent" />
         <h1 className="text-lg font-semibold">{project.name} — 汇报输出</h1>
       </header>
+      {draftNotice && (
+        <div className="flex items-center justify-center gap-2 border-b border-dark-600 bg-dark-800/50 px-6 py-2 text-sm text-dark-300">
+          <span>已加载上一版汇报草稿</span>
+          <button onClick={onReset} className="flex items-center gap-1 text-accent hover:text-accent/80">
+            <Edit2 size={12} /> 重新编辑
+          </button>
+        </div>
+      )}
       <div className="flex flex-1 overflow-hidden">
         <div className="flex w-[55%] flex-col border-r border-dark-600">
           <div className="px-6 pt-5 pb-3">
+            <div className="mb-4 flex items-center gap-3">
+              <span className="text-sm text-dark-400">模板：</span>
+              <div className="flex gap-2">
+                {(Object.keys(REPORT_TEMPLATE_LABELS) as ReportTemplateType[]).map(t => (
+                  <button
+                    key={t}
+                    onClick={()=>onTemplateChange(t)}
+                    className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+                      template === t ? 'bg-accent text-dark-900' : 'bg-dark-700 text-dark-300 hover:bg-dark-600'
+                    }`}
+                  >
+                    {REPORT_TEMPLATE_LABELS[t]}
+                  </button>
+                ))}
+              </div>
+            </div>
             <h2 className="text-base font-semibold">材料选择</h2>
             <p className="mt-0.5 text-sm text-dark-300">从时间线中选择典型素材</p>
           </div>
@@ -151,7 +251,17 @@ export default function Report() {
               {materials.map((mat, i) => {
                 const Icon = TYPE_ICONS[mat.type]
                 return (
-                  <div key={mat.id} className={`flex items-start gap-3 rounded-lg border p-4 ${mat.selected?`${TYPE_BORDER[mat.type]} bg-dark-700/50`:'border-dark-600 bg-dark-800'}`}>
+                  <div
+                    key={mat.id}
+                    className={`relative flex items-start gap-3 rounded-lg border p-4 transition-opacity ${
+                      mat.selected ? `${TYPE_BORDER[mat.type]} bg-dark-700/50` : 'border-dark-600 bg-dark-800'
+                    } ${isGen ? 'opacity-60 pointer-events-none' : ''}`}
+                  >
+                    {isGen && (
+                      <div className="absolute right-3 top-3">
+                        <Lock size={14} className="text-dark-400" />
+                      </div>
+                    )}
                     <button onClick={()=>onTog(mat.id)} className="mt-0.5 shrink-0">
                       {mat.selected?<CheckSquare size={18} className="text-accent"/>:<Square size={18} className="text-dark-400"/>}
                     </button>
@@ -178,6 +288,7 @@ export default function Report() {
             <div>
               <div className="flex items-center gap-2">
                 {isGen && <div className="h-2 w-2 rounded-full bg-success"/>}
+                <span className="rounded bg-dark-700 px-2 py-0.5 text-xs text-dark-300">[{REPORT_TEMPLATE_LABELS[template]}]</span>
                 <h2 className="text-base font-semibold">{isGen?'正式汇报提纲':'提纲草稿'}</h2>
               </div>
               <div className="mt-0.5 flex items-center gap-2 text-xs text-dark-400">
@@ -198,7 +309,7 @@ export default function Report() {
             <div className="rounded-lg bg-dark-800 p-6">
               <h3 className="mb-6 text-center text-lg font-bold">{project.name}</h3>
               {sel.length===0 && !isGen?(
-                <p className="py-8 text-center text-sm text-dark-400">请从左侧选择素材以生成汇报提纲</p>
+                <p className="py-8 text-center text-sm text-dark-400">暂无选中素材</p>
               ):(
                 <div className="space-y-5">
                   {sects.map((s, i) => (
@@ -230,7 +341,7 @@ export default function Report() {
                               ))}
                             </ul>
                           ):(
-                            <p className="mt-2 text-sm text-dark-500">（暂无素材）</p>
+                            <p className="mt-2 text-sm text-dark-500">（暂无内容）</p>
                           )}
                         </div>
                       </div>
@@ -243,7 +354,7 @@ export default function Report() {
         </div>
       </div>
       {toast && (
-        <div className="pointer-events-none fixed bottom-8 left-1/2 -translate-x-1/2 rounded-lg bg-dark-700 px-4 py-2 text-sm text-dark-100 shadow-lg border border-dark-600">{toast}</div>
+        <div className="pointer-events-none fixed bottom-8 left-1/2 -translate-x-1/2 rounded-lg bg-dark-700/90 px-4 py-2 text-xs text-dark-100 shadow-lg border border-dark-600 backdrop-blur-sm">{toast}</div>
       )}
     </div>
   )

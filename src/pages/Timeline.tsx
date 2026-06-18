@@ -4,14 +4,13 @@ import { useState, useMemo } from 'react'
 import {
   ArrowLeft, Users, MessageSquare, TrendingUp, TrendingDown, Minus,
   Flame, Snowflake, RefreshCw, Radio, Share2, Newspaper, Shield,
-  X, Check, FileText,
+  X, Check, FileText, Lightbulb, ChevronDown, ChevronRight, Target, AlertTriangle, Zap
 } from 'lucide-react'
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine,
 } from 'recharts'
 import type { TimelineEvent, RoleType, NodeType, SentimentType } from '@/types'
 import { ROLE_LABELS, NODE_TYPE_LABELS, SENTIMENT_LABELS } from '@/types'
-
 const NODE_ICON_MAP: Record<NodeType, React.ElementType> = {
   breakout: Flame, cooldown: Snowflake, re_ferment: RefreshCw,
   origin: Radio, spread: Share2, media_relay: Newspaper, official_response: Shield,
@@ -56,16 +55,12 @@ const ROLE_BADGE: Record<RoleType, string> = {
 const SENTIMENT_DOT: Record<string, string> = {
   positive: 'bg-success', negative: 'bg-breakout', neutral: 'bg-dark-500',
 }
-
 const ALL_ROLES: RoleType[] = ['tourist', 'local_resident', 'media', 'influencer', 'travel_agency']
 
 const SENTIMENT_FILTERS: Array<{ key: SentimentType | 'all'; label: string }> = [
-  { key: 'all', label: '全部' },
-  { key: 'positive', label: '正面' },
-  { key: 'neutral', label: '中性' },
-  { key: 'negative', label: '负面' },
+  { key: 'all', label: '全部' }, { key: 'positive', label: '正面' },
+  { key: 'neutral', label: '中性' }, { key: 'negative', label: '负面' },
 ]
-
 const CONFIRMED_FILTERS: Array<{ key: 'all' | 'confirmed' | 'unconfirmed'; label: string }> = [
   { key: 'all', label: '全部' },
   { key: 'confirmed', label: '已确认' },
@@ -76,28 +71,41 @@ function formatTime(ts: string) {
   const d = new Date(ts)
   return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
-
 function formatDate(ts: string) {
   const d = new Date(ts)
   return `${d.getMonth() + 1}/${d.getDate()}`
 }
-
 function SentimentIcon({ sentiment }: { sentiment: string }) {
   if (sentiment === 'positive') return <TrendingUp size={12} />
   if (sentiment === 'negative') return <TrendingDown size={12} />
   return <Minus size={12} />
 }
-
 function ChartTooltip({ active, payload, label }: any) {
   if (!active || !payload?.length) return null
   return (
     <div className="bg-dark-800 border border-dark-600 rounded-lg px-3 py-2 shadow-xl">
       <p className="text-dark-300 text-xs font-mono mb-1">{label}</p>
       {payload.map((s: any) => (
-        <p key={s.name} className="text-xs" style={{ color: s.color }}>
-          {s.name === 'positive' ? '正面' : '负面'}: {s.value}
-        </p>
+        <p key={s.name} className="text-xs" style={{ color: s.color }}>{s.name === 'positive' ? '正面' : '负面'}: {s.value}</p>
       ))}
+    </div>
+  )
+}
+
+function InsightCategory({ icon: Icon, title, items, color }: {
+  icon: React.ElementType; title: string; items: string[]; color: string
+}) {
+  return (
+    <div>
+      <div className="flex items-center gap-1.5 mb-1.5">
+        <Icon size={11} className={color} />
+        <span className="text-xs font-bold">{title}</span>
+      </div>
+      {items.length > 0 ? (
+        <ul className="space-y-1 pl-5">
+          {items.map((item, i) => <li key={i} className={`text-xs ${color} list-disc`}>{item}</li>)}
+        </ul>
+      ) : <p className="text-xs text-dark-400 pl-5">（暂无）</p>}
     </div>
   )
 }
@@ -110,11 +118,30 @@ export default function Timeline() {
     opinionPanelOpen, toggleOpinionPanel, activeRoleFilters, setActiveRoleFilters,
     confirmOpinionItem, updateOpinionItem,
     opinionFilter, setOpinionFilter, resetOpinionFilter, batchConfirmByProject,
+    generateOpinionInsights,
   } = useStore()
 
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [toastVisible, setToastVisible] = useState(false)
+  const [insightsExpanded, setInsightsExpanded] = useState(false)
+  const [expandedRoles, setExpandedRoles] = useState<Set<RoleType>>(new Set())
 
+  const ChevronIcon = ({ e, s = 12 }: { e: boolean; s?: number }) =>
+    e ? <ChevronDown size={s} className="text-dark-400" /> : <ChevronRight size={s} className="text-dark-400" />
+
+  const toggleRoleFilter = (role: RoleType) => setActiveRoleFilters(
+    activeRoleFilters.includes(role) ? activeRoleFilters.filter((r) => r !== role) : [...activeRoleFilters, role]
+  )
+  const handleBatchConfirm = () => {
+    batchConfirmByProject(id!)
+    setToastVisible(true)
+    setTimeout(() => setToastVisible(false), 2000)
+  }
+  const toggleRoleInsight = (role: RoleType) => setExpandedRoles((prev) => {
+    const next = new Set(prev)
+    next.has(role) ? next.delete(role) : next.add(role)
+    return next
+  })
   const project = getProjectById(id!)
   const events = useMemo(
     () => getEventsByProject(id!).sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()),
@@ -154,34 +181,22 @@ export default function Timeline() {
     })
   }, [opinions, activeRoleFilters, opinionFilter])
 
+  const opinionInsights = useMemo(
+    () => generateOpinionInsights(id!, filteredOpinions),
+    [id, filteredOpinions, generateOpinionInsights]
+  )
   const roleCounts = useMemo(() => {
-    const counts: Record<RoleType, number> = { tourist: 0, local_resident: 0, media: 0, influencer: 0, travel_agency: 0 }
+    const counts = {} as Record<RoleType, number>
+    ALL_ROLES.forEach((r) => (counts[r] = 0))
     opinions.forEach((o) => counts[o.role]++)
     return counts
   }, [opinions])
-
   const roleSentimentStats = useMemo(() => {
-    const stats: Record<RoleType, { total: number; positive: number; neutral: number; negative: number }> = {
-      tourist: { total: 0, positive: 0, neutral: 0, negative: 0 },
-      local_resident: { total: 0, positive: 0, neutral: 0, negative: 0 },
-      media: { total: 0, positive: 0, neutral: 0, negative: 0 },
-      influencer: { total: 0, positive: 0, neutral: 0, negative: 0 },
-      travel_agency: { total: 0, positive: 0, neutral: 0, negative: 0 },
-    }
+    const stats = {} as Record<RoleType, { total: number; positive: number; neutral: number; negative: number }>
+    ALL_ROLES.forEach((r) => (stats[r] = { total: 0, positive: 0, neutral: 0, negative: 0 }))
     opinions.forEach((o) => { stats[o.role].total++; stats[o.role][o.sentiment]++ })
     return stats
   }, [opinions])
-
-  const toggleRoleFilter = (role: RoleType) => setActiveRoleFilters(
-    activeRoleFilters.includes(role)
-      ? activeRoleFilters.filter((r) => r !== role)
-      : [...activeRoleFilters, role]
-  )
-  const handleBatchConfirm = () => {
-    batchConfirmByProject(id!)
-    setToastVisible(true)
-    setTimeout(() => setToastVisible(false), 2000)
-  }
 
   return (
     <div className="h-screen flex flex-col bg-dark-900 text-dark-100 overflow-hidden">
@@ -428,6 +443,47 @@ export default function Timeline() {
             </div>
           </div>
 
+          <div className="border-t border-dark-600 px-4 py-2.5 shrink-0">
+            <button
+              onClick={() => setInsightsExpanded(!insightsExpanded)}
+              className="w-full flex items-center justify-between text-left hover:bg-dark-700/50 rounded-md px-2 py-1.5 -mx-2 transition-colors"
+            >
+              <div className="flex items-center gap-2">
+                <Lightbulb size={14} className="text-accent" />
+                <span className="text-sm font-medium">复盘洞察</span>
+              </div>
+              <ChevronIcon e={insightsExpanded} s={14} />
+
+            </button>
+
+            {insightsExpanded && <div className="mt-2 space-y-2">
+              {filteredOpinions.length === 0 ? <div className="text-center py-4 text-dark-500 text-xs">调整筛选条件后自动生成洞察</div> : (
+                ALL_ROLES.map((role) => {
+                  const cnt = filteredOpinions.filter((o) => o.role === role).length
+                  if (cnt === 0) return null
+                  const insight = opinionInsights[role]
+                  const isRoleExpanded = expandedRoles.has(role)
+                  return (
+                    <div key={role} className="bg-dark-700/50 rounded-lg border border-dark-600/50 overflow-hidden">
+                      <button onClick={() => toggleRoleInsight(role)} className="w-full flex items-center justify-between text-left px-3 py-2 hover:bg-dark-600/30 transition-colors">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs px-2 py-0.5 rounded-full ${ROLE_BADGE[role]}`}>{ROLE_LABELS[role]}</span>
+                          <span className="text-[10px] text-dark-500">{cnt}条观点</span>
+                        </div>
+                        <ChevronIcon e={isRoleExpanded} />
+                      </button>
+                      {isRoleExpanded && <div className="px-3 pb-3 space-y-2.5">
+                        <InsightCategory icon={Target} title="主要诉求" items={insight.demands} color="text-dark-300" />
+                        <InsightCategory icon={AlertTriangle} title="风险点" items={insight.risks} color="text-breakout" />
+                        <InsightCategory icon={Zap} title="建议动作" items={insight.suggestions} color="text-success" />
+                      </div>}
+                    </div>
+                  )
+                })
+              )}
+            </div>}
+          </div>
+
           <div className="flex-1 overflow-y-auto px-4 py-3 space-y-3">
             {ALL_ROLES.map((role) => {
               const items = filteredOpinions.filter((o) => o.role === role)
@@ -483,11 +539,7 @@ export default function Timeline() {
                 </div>
               )
             })}
-            {filteredOpinions.length === 0 && (
-              <div className="text-center py-8 text-dark-500 text-xs">
-                暂无匹配的观点数据
-              </div>
-            )}
+            {filteredOpinions.length === 0 && <div className="text-center py-8 text-dark-500 text-xs">暂无匹配的观点数据</div>}
           </div>
         </div>
       )}

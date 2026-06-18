@@ -1,14 +1,9 @@
 import { create } from 'zustand'
-import type { Project, TimelineEvent, OpinionItem, ReportMaterial, RoleType, SentimentType } from '@/types'
+import type { Project, TimelineEvent, OpinionItem, ReportMaterial, RoleType, SentimentType, ReportTemplateType, ReportDraft, ImportTargetType, ImportFieldPreview, ImportPreviewData, OpinionFilterState } from '@/types'
+import { REPORT_TEMPLATES } from '@/types'
 import { mockProjects, mockTimelineEvents, mockOpinionItems, mockReportMaterials } from '@/data/mockData'
 
 const STORAGE_KEY = 'sentiment_analysis_store_v1'
-
-export interface OpinionFilterState {
-  sentiment: SentimentType | 'all'
-  platform: string
-  confirmed: 'all' | 'confirmed' | 'unconfirmed'
-}
 
 interface ImportPayload {
   project: Project
@@ -29,6 +24,10 @@ interface StoreState {
   selectedEventId: string | null
   opinionFilter: OpinionFilterState
   reportGeneratedAt: string | null
+  currentReportTemplate: ReportTemplateType
+  reportDrafts: ReportDraft[]
+  currentDraftId: string | null
+  importPreview: ImportPreviewData | null
 
   setCurrentProject: (id: string | null) => void
   addProject: (project: Project) => void
@@ -55,6 +54,14 @@ interface StoreState {
   getOpinionsByProject: (projectId: string) => OpinionItem[]
   getMaterialsByProject: (projectId: string) => ReportMaterial[]
   resetStore: () => void
+  setCurrentReportTemplate: (template: ReportTemplateType) => void
+  saveReportDraft: (draft: Omit<ReportDraft, 'id'>) => string
+  setCurrentDraftId: (id: string | null) => void
+  deleteDraft: (id: string) => void
+  getDraftByProject: (projectId: string) => ReportDraft | undefined
+  setImportPreview: (preview: ImportPreviewData | null) => void
+  updateFieldMapping: (sourceKey: string, updates: Partial<ImportFieldPreview>) => void
+  generateOpinionInsights: (projectId: string, filteredOpinions?: OpinionItem[]) => Record<RoleType, { demands: string[]; risks: string[]; suggestions: string[] }>
 }
 
 function loadPersistedState(): Partial<StoreState> | null {
@@ -78,11 +85,16 @@ function persistState(state: StoreState) {
       selectedFilters: state.selectedFilters,
       activeRoleFilters: state.activeRoleFilters,
       reportGeneratedAt: state.reportGeneratedAt,
+      reportDrafts: state.reportDrafts,
+      currentReportTemplate: state.currentReportTemplate,
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave))
   } catch {
-    // ignore
   }
+}
+
+function generateId(): string {
+  return Date.now().toString(36) + Math.random().toString(36).substr(2)
 }
 
 const persisted = loadPersistedState()
@@ -99,6 +111,10 @@ export const useStore = create<StoreState>((set, get) => ({
   selectedEventId: null,
   opinionFilter: { sentiment: 'all', platform: '', confirmed: 'all' },
   reportGeneratedAt: persisted?.reportGeneratedAt ?? null,
+  currentReportTemplate: persisted?.currentReportTemplate ?? 'internal',
+  reportDrafts: persisted?.reportDrafts ?? [],
+  currentDraftId: null,
+  importPreview: null,
 
   setCurrentProject: (id) => set({ currentProjectId: id }),
 
@@ -260,6 +276,126 @@ export const useStore = create<StoreState>((set, get) => ({
       selectedFilters: { status: 'all', sortBy: 'date' },
       activeRoleFilters: [],
       reportGeneratedAt: null,
+      currentReportTemplate: 'internal',
+      reportDrafts: [],
+      currentDraftId: null,
+      importPreview: null,
     })
+  },
+
+  setCurrentReportTemplate: (template) => set((state) => {
+    const next = { currentReportTemplate: template }
+    persistState({ ...state, ...next })
+    return next
+  }),
+
+  saveReportDraft: (draft) => {
+    const id = generateId()
+    const newDraft: ReportDraft = { ...draft, id }
+    set((state) => {
+      const next = { reportDrafts: [...state.reportDrafts, newDraft] }
+      persistState({ ...state, ...next })
+      return next
+    })
+    return id
+  },
+
+  setCurrentDraftId: (id) => set({ currentDraftId: id }),
+
+  deleteDraft: (id) => set((state) => {
+    const next = {
+      reportDrafts: state.reportDrafts.filter((d) => d.id !== id),
+      currentDraftId: state.currentDraftId === id ? null : state.currentDraftId,
+    }
+    persistState({ ...state, ...next })
+    return next
+  }),
+
+  getDraftByProject: (projectId) => {
+    const drafts = get().reportDrafts.filter((d) => d.projectId === projectId)
+    if (drafts.length === 0) return undefined
+    return drafts.sort((a, b) => new Date(b.generatedAt).getTime() - new Date(a.generatedAt).getTime())[0]
+  },
+
+  setImportPreview: (preview) => set({ importPreview: preview }),
+
+  updateFieldMapping: (sourceKey, updates) => set((state) => {
+    if (!state.importPreview) return state
+    const next = {
+      importPreview: {
+        ...state.importPreview,
+        fieldMappings: state.importPreview.fieldMappings.map((fm) =>
+          fm.sourceKey === sourceKey ? { ...fm, ...updates } : fm
+        ),
+      },
+    }
+    return next
+  }),
+
+  generateOpinionInsights: (projectId, filteredOpinions) => {
+    const opinions = filteredOpinions ?? get().getOpinionsByProject(projectId)
+    const roles: RoleType[] = ['tourist', 'local_resident', 'media', 'influencer', 'travel_agency']
+    const demandKeywords = ['希望', '要求', '建议', '需要', '能否', '改善']
+    const riskKeywords = ['不满', '投诉', '曝光', '严重', '问题', '风险']
+
+    const extractSentences = (content: string, keywords: string[]): string[] => {
+      const sentences = content.split(/[。！？.!?]/).filter((s) => s.trim().length > 0)
+      const matched = sentences.filter((s) => keywords.some((k) => s.includes(k)))
+      return matched.slice(0, 3)
+    }
+
+    const generateSuggestions = (demands: string[]): string[] => {
+      const suggestions: string[] = []
+      for (const demand of demands) {
+        if (demand.includes('停车场') || demand.includes('停车')) {
+          suggestions.push('优化停车指引，增加停车位供给')
+        } else if (demand.includes('排队') || demand.includes('等待')) {
+          suggestions.push('优化排队管理，增设预约通道')
+        } else if (demand.includes('卫生') || demand.includes('厕所')) {
+          suggestions.push('加强环境卫生管理，提升保洁频次')
+        } else if (demand.includes('服务') || demand.includes('态度')) {
+          suggestions.push('加强服务人员培训，提升服务质量')
+        } else if (demand.includes('价格') || demand.includes('贵')) {
+          suggestions.push('优化定价策略，增加性价比')
+        } else if (demand.includes('交通')) {
+          suggestions.push('优化交通接驳，增加公共交通选项')
+        } else if (demand.includes('餐饮') || demand.includes('吃')) {
+          suggestions.push('丰富餐饮选择，提升餐饮品质')
+        } else if (demand.includes('住宿') || demand.includes('酒店')) {
+          suggestions.push('优化住宿配套，提升入住体验')
+        }
+      }
+      return suggestions.slice(0, 3)
+    }
+
+    const result = {} as Record<RoleType, { demands: string[]; risks: string[]; suggestions: string[] }>
+
+    for (const role of roles) {
+      const roleOpinions = opinions.filter((o) => o.role === role)
+      const demands: string[] = []
+      const risks: string[] = []
+
+      for (const opinion of roleOpinions) {
+        const demandSnippets = extractSentences(opinion.content, demandKeywords)
+        demands.push(...demandSnippets)
+
+        if (opinion.sentiment === 'negative') {
+          const riskSnippets = extractSentences(opinion.content, riskKeywords)
+          risks.push(...riskSnippets)
+        }
+      }
+
+      const uniqueDemands = [...new Set(demands)].slice(0, 3)
+      const uniqueRisks = [...new Set(risks)].slice(0, 3)
+      const suggestions = generateSuggestions(uniqueDemands)
+
+      result[role] = {
+        demands: uniqueDemands,
+        risks: uniqueRisks,
+        suggestions,
+      }
+    }
+
+    return result
   },
 }))
