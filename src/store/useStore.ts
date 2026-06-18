@@ -1,6 +1,21 @@
 import { create } from 'zustand'
-import type { Project, TimelineEvent, OpinionItem, ReportMaterial, RoleType } from '@/types'
+import type { Project, TimelineEvent, OpinionItem, ReportMaterial, RoleType, SentimentType } from '@/types'
 import { mockProjects, mockTimelineEvents, mockOpinionItems, mockReportMaterials } from '@/data/mockData'
+
+const STORAGE_KEY = 'sentiment_analysis_store_v1'
+
+export interface OpinionFilterState {
+  sentiment: SentimentType | 'all'
+  platform: string
+  confirmed: 'all' | 'confirmed' | 'unconfirmed'
+}
+
+interface ImportPayload {
+  project: Project
+  events?: TimelineEvent[]
+  opinions?: OpinionItem[]
+  materials?: ReportMaterial[]
+}
 
 interface StoreState {
   projects: Project[]
@@ -12,79 +27,239 @@ interface StoreState {
   activeRoleFilters: RoleType[]
   opinionPanelOpen: boolean
   selectedEventId: string | null
+  opinionFilter: OpinionFilterState
+  reportGeneratedAt: string | null
 
   setCurrentProject: (id: string | null) => void
   addProject: (project: Project) => void
+  importProject: (payload: ImportPayload) => string
   updateProject: (id: string, updates: Partial<Project>) => void
   deleteProject: (id: string) => void
   setSelectedFilters: (filters: Partial<{ status: string; sortBy: string }>) => void
   setActiveRoleFilters: (roles: RoleType[]) => void
   toggleOpinionPanel: () => void
+  setOpinionPanelOpen: (open: boolean) => void
   setSelectedEventId: (id: string | null) => void
+  setOpinionFilter: (filter: Partial<OpinionFilterState>) => void
+  resetOpinionFilter: () => void
   updateOpinionItem: (id: string, updates: Partial<OpinionItem>) => void
   confirmOpinionItem: (id: string) => void
+  batchConfirmByProject: (projectId: string) => void
   toggleMaterialSelection: (id: string) => void
+  setMaterialSelected: (id: string, selected: boolean) => void
   updateMaterialOrder: (id: string, newOrder: number) => void
+  swapMaterialOrder: (idA: string, idB: string) => void
+  markReportGenerated: () => void
   getProjectById: (id: string) => Project | undefined
   getEventsByProject: (projectId: string) => TimelineEvent[]
   getOpinionsByProject: (projectId: string) => OpinionItem[]
   getMaterialsByProject: (projectId: string) => ReportMaterial[]
+  resetStore: () => void
 }
 
+function loadPersistedState(): Partial<StoreState> | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function persistState(state: StoreState) {
+  try {
+    const toSave: Partial<StoreState> = {
+      projects: state.projects,
+      timelineEvents: state.timelineEvents,
+      opinionItems: state.opinionItems,
+      reportMaterials: state.reportMaterials,
+      selectedFilters: state.selectedFilters,
+      activeRoleFilters: state.activeRoleFilters,
+      reportGeneratedAt: state.reportGeneratedAt,
+    }
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(toSave))
+  } catch {
+    // ignore
+  }
+}
+
+const persisted = loadPersistedState()
+
 export const useStore = create<StoreState>((set, get) => ({
-  projects: mockProjects,
+  projects: persisted?.projects ?? mockProjects,
   currentProjectId: null,
-  timelineEvents: mockTimelineEvents,
-  opinionItems: mockOpinionItems,
-  reportMaterials: mockReportMaterials,
-  selectedFilters: { status: 'all', sortBy: 'date' },
-  activeRoleFilters: [],
+  timelineEvents: persisted?.timelineEvents ?? mockTimelineEvents,
+  opinionItems: persisted?.opinionItems ?? mockOpinionItems,
+  reportMaterials: persisted?.reportMaterials ?? mockReportMaterials,
+  selectedFilters: persisted?.selectedFilters ?? { status: 'all', sortBy: 'date' },
+  activeRoleFilters: persisted?.activeRoleFilters ?? [],
   opinionPanelOpen: false,
   selectedEventId: null,
+  opinionFilter: { sentiment: 'all', platform: '', confirmed: 'all' },
+  reportGeneratedAt: persisted?.reportGeneratedAt ?? null,
 
   setCurrentProject: (id) => set({ currentProjectId: id }),
 
-  addProject: (project) => set((state) => ({ projects: [...state.projects, project] })),
+  addProject: (project) => set((state) => {
+    const next = { projects: [...state.projects, project] }
+    persistState({ ...state, ...next })
+    return next
+  }),
 
-  updateProject: (id, updates) => set((state) => ({
-    projects: state.projects.map((p) => p.id === id ? { ...p, ...updates } : p),
-  })),
+  importProject: ({ project, events = [], opinions = [], materials = [] }) => {
+    const pid = project.id
+    const newProject: Project = project
+    const newEvents = events.map((e) => ({ ...e, projectId: pid }))
+    const newOpinions = opinions.map((o) => ({ ...o, projectId: pid }))
+    const newMaterials = materials.map((m) => ({ ...m, projectId: pid }))
+    set((state) => {
+      const next = {
+        projects: [...state.projects, newProject],
+        timelineEvents: [...state.timelineEvents, ...newEvents],
+        opinionItems: [...state.opinionItems, ...newOpinions],
+        reportMaterials: [...state.reportMaterials, ...newMaterials],
+      }
+      persistState({ ...state, ...next })
+      return next
+    })
+    return pid
+  },
 
-  deleteProject: (id) => set((state) => ({
-    projects: state.projects.filter((p) => p.id !== id),
-  })),
+  updateProject: (id, updates) => set((state) => {
+    const next = {
+      projects: state.projects.map((p) => p.id === id ? { ...p, ...updates } : p),
+    }
+    persistState({ ...state, ...next })
+    return next
+  }),
 
-  setSelectedFilters: (filters) => set((state) => ({
-    selectedFilters: { ...state.selectedFilters, ...filters },
-  })),
+  deleteProject: (id) => set((state) => {
+    const next = {
+      projects: state.projects.filter((p) => p.id !== id),
+      timelineEvents: state.timelineEvents.filter((e) => e.projectId !== id),
+      opinionItems: state.opinionItems.filter((o) => o.projectId !== id),
+      reportMaterials: state.reportMaterials.filter((m) => m.projectId !== id),
+    }
+    persistState({ ...state, ...next })
+    return next
+  }),
 
-  setActiveRoleFilters: (roles) => set({ activeRoleFilters: roles }),
+  setSelectedFilters: (filters) => set((state) => {
+    const next = { selectedFilters: { ...state.selectedFilters, ...filters } }
+    persistState({ ...state, ...next })
+    return next
+  }),
 
-  toggleOpinionPanel: () => set((state) => ({ opinionPanelOpen: !state.opinionPanelOpen })),
+  setActiveRoleFilters: (roles) => set((state) => {
+    const next = { activeRoleFilters: roles }
+    persistState({ ...state, ...next })
+    return next
+  }),
+
+  toggleOpinionPanel: () => set({ opinionPanelOpen: !get().opinionPanelOpen }),
+  setOpinionPanelOpen: (open) => set({ opinionPanelOpen: open }),
 
   setSelectedEventId: (id) => set({ selectedEventId: id }),
 
-  updateOpinionItem: (id, updates) => set((state) => ({
-    opinionItems: state.opinionItems.map((item) => item.id === id ? { ...item, ...updates } : item),
+  setOpinionFilter: (filter) => set((state) => ({
+    opinionFilter: { ...state.opinionFilter, ...filter },
   })),
 
-  confirmOpinionItem: (id) => set((state) => ({
-    opinionItems: state.opinionItems.map((item) => item.id === id ? { ...item, confirmed: true } : item),
-  })),
+  resetOpinionFilter: () => set({
+    opinionFilter: { sentiment: 'all', platform: '', confirmed: 'all' },
+  }),
 
-  toggleMaterialSelection: (id) => set((state) => ({
-    reportMaterials: state.reportMaterials.map((m) => m.id === id ? { ...m, selected: !m.selected } : m),
-  })),
+  updateOpinionItem: (id, updates) => set((state) => {
+    const next = {
+      opinionItems: state.opinionItems.map((item) => item.id === id ? { ...item, ...updates } : item),
+    }
+    persistState({ ...state, ...next })
+    return next
+  }),
 
-  updateMaterialOrder: (id, newOrder) => set((state) => ({
-    reportMaterials: state.reportMaterials.map((m) => m.id === id ? { ...m, sortOrder: newOrder } : m),
-  })),
+  confirmOpinionItem: (id) => set((state) => {
+    const next = {
+      opinionItems: state.opinionItems.map((item) => item.id === id ? { ...item, confirmed: true } : item),
+    }
+    persistState({ ...state, ...next })
+    return next
+  }),
+
+  batchConfirmByProject: (projectId) => set((state) => {
+    const next = {
+      opinionItems: state.opinionItems.map((o) => o.projectId === projectId ? { ...o, confirmed: true } : o),
+    }
+    persistState({ ...state, ...next })
+    return next
+  }),
+
+  toggleMaterialSelection: (id) => set((state) => {
+    const next = {
+      reportMaterials: state.reportMaterials.map((m) => m.id === id ? { ...m, selected: !m.selected } : m),
+    }
+    persistState({ ...state, ...next })
+    return next
+  }),
+
+  setMaterialSelected: (id, selected) => set((state) => {
+    const next = {
+      reportMaterials: state.reportMaterials.map((m) => m.id === id ? { ...m, selected } : m),
+    }
+    persistState({ ...state, ...next })
+    return next
+  }),
+
+  updateMaterialOrder: (id, newOrder) => set((state) => {
+    const next = {
+      reportMaterials: state.reportMaterials.map((m) => m.id === id ? { ...m, sortOrder: newOrder } : m),
+    }
+    persistState({ ...state, ...next })
+    return next
+  }),
+
+  swapMaterialOrder: (idA, idB) => set((state) => {
+    const a = state.reportMaterials.find((m) => m.id === idA)
+    const b = state.reportMaterials.find((m) => m.id === idB)
+    if (!a || !b) return state
+    const orderA = a.sortOrder
+    const orderB = b.sortOrder
+    const next = {
+      reportMaterials: state.reportMaterials.map((m) => {
+        if (m.id === idA) return { ...m, sortOrder: orderB }
+        if (m.id === idB) return { ...m, sortOrder: orderA }
+        return m
+      }),
+    }
+    persistState({ ...state, ...next })
+    return next
+  }),
+
+  markReportGenerated: () => {
+    const ts = new Date().toISOString()
+    set((state) => {
+      const next = { reportGeneratedAt: ts }
+      persistState({ ...state, ...next })
+      return next
+    })
+  },
 
   getProjectById: (id) => get().projects.find((p) => p.id === id),
-
   getEventsByProject: (projectId) => get().timelineEvents.filter((e) => e.projectId === projectId),
-
   getOpinionsByProject: (projectId) => get().opinionItems.filter((o) => o.projectId === projectId),
-
   getMaterialsByProject: (projectId) => get().reportMaterials.filter((m) => m.projectId === projectId),
+
+  resetStore: () => {
+    localStorage.removeItem(STORAGE_KEY)
+    set({
+      projects: mockProjects,
+      timelineEvents: mockTimelineEvents,
+      opinionItems: mockOpinionItems,
+      reportMaterials: mockReportMaterials,
+      selectedFilters: { status: 'all', sortBy: 'date' },
+      activeRoleFilters: [],
+      reportGeneratedAt: null,
+    })
+  },
 }))

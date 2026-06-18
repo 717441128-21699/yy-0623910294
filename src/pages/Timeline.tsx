@@ -4,12 +4,12 @@ import { useState, useMemo } from 'react'
 import {
   ArrowLeft, Users, MessageSquare, TrendingUp, TrendingDown, Minus,
   Flame, Snowflake, RefreshCw, Radio, Share2, Newspaper, Shield,
-  Clock, ChevronRight, X, Check, AlertTriangle, FileText,
+  X, Check, FileText,
 } from 'lucide-react'
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine,
 } from 'recharts'
-import type { TimelineEvent, RoleType, NodeType } from '@/types'
+import type { TimelineEvent, RoleType, NodeType, SentimentType } from '@/types'
 import { ROLE_LABELS, NODE_TYPE_LABELS, SENTIMENT_LABELS } from '@/types'
 
 const NODE_ICON_MAP: Record<NodeType, React.ElementType> = {
@@ -59,6 +59,19 @@ const SENTIMENT_DOT: Record<string, string> = {
 
 const ALL_ROLES: RoleType[] = ['tourist', 'local_resident', 'media', 'influencer', 'travel_agency']
 
+const SENTIMENT_FILTERS: Array<{ key: SentimentType | 'all'; label: string }> = [
+  { key: 'all', label: '全部' },
+  { key: 'positive', label: '正面' },
+  { key: 'neutral', label: '中性' },
+  { key: 'negative', label: '负面' },
+]
+
+const CONFIRMED_FILTERS: Array<{ key: 'all' | 'confirmed' | 'unconfirmed'; label: string }> = [
+  { key: 'all', label: '全部' },
+  { key: 'confirmed', label: '已确认' },
+  { key: 'unconfirmed', label: '待确认' },
+]
+
 function formatTime(ts: string) {
   const d = new Date(ts)
   return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
@@ -96,9 +109,11 @@ export default function Timeline() {
     getProjectById, getEventsByProject, getOpinionsByProject,
     opinionPanelOpen, toggleOpinionPanel, activeRoleFilters, setActiveRoleFilters,
     confirmOpinionItem, updateOpinionItem,
+    opinionFilter, setOpinionFilter, resetOpinionFilter, batchConfirmByProject,
   } = useStore()
 
   const [expandedId, setExpandedId] = useState<string | null>(null)
+  const [toastVisible, setToastVisible] = useState(false)
 
   const project = getProjectById(id!)
   const events = useMemo(
@@ -112,8 +127,7 @@ export default function Timeline() {
     events.forEach((e) => {
       const key = formatDate(e.timestamp)
       const d = map.get(key) || { date: key, positive: 0, negative: 0, neutral: 0 }
-      d[e.sentiment]++
-      map.set(key, d)
+      d[e.sentiment]++; map.set(key, d)
     })
     return Array.from(map.values())
   }, [events])
@@ -123,10 +137,22 @@ export default function Timeline() {
     [events],
   )
 
+  const uniquePlatforms = useMemo(() => {
+    const set = new Set<string>()
+    opinions.forEach((o) => set.add(o.platform))
+    return Array.from(set)
+  }, [opinions])
+
   const filteredOpinions = useMemo(() => {
-    if (activeRoleFilters.length === 0) return opinions
-    return opinions.filter((o) => activeRoleFilters.includes(o.role))
-  }, [opinions, activeRoleFilters])
+    return opinions.filter((o) => {
+      if (activeRoleFilters.length > 0 && !activeRoleFilters.includes(o.role)) return false
+      if (opinionFilter.sentiment !== 'all' && o.sentiment !== opinionFilter.sentiment) return false
+      if (opinionFilter.platform !== '' && o.platform !== opinionFilter.platform) return false
+      if (opinionFilter.confirmed === 'confirmed' && !o.confirmed) return false
+      if (opinionFilter.confirmed === 'unconfirmed' && o.confirmed) return false
+      return true
+    })
+  }, [opinions, activeRoleFilters, opinionFilter])
 
   const roleCounts = useMemo(() => {
     const counts: Record<RoleType, number> = { tourist: 0, local_resident: 0, media: 0, influencer: 0, travel_agency: 0 }
@@ -134,12 +160,27 @@ export default function Timeline() {
     return counts
   }, [opinions])
 
-  const toggleRoleFilter = (role: RoleType) => {
-    if (activeRoleFilters.includes(role)) {
-      setActiveRoleFilters(activeRoleFilters.filter((r) => r !== role))
-    } else {
-      setActiveRoleFilters([...activeRoleFilters, role])
+  const roleSentimentStats = useMemo(() => {
+    const stats: Record<RoleType, { total: number; positive: number; neutral: number; negative: number }> = {
+      tourist: { total: 0, positive: 0, neutral: 0, negative: 0 },
+      local_resident: { total: 0, positive: 0, neutral: 0, negative: 0 },
+      media: { total: 0, positive: 0, neutral: 0, negative: 0 },
+      influencer: { total: 0, positive: 0, neutral: 0, negative: 0 },
+      travel_agency: { total: 0, positive: 0, neutral: 0, negative: 0 },
     }
+    opinions.forEach((o) => { stats[o.role].total++; stats[o.role][o.sentiment]++ })
+    return stats
+  }, [opinions])
+
+  const toggleRoleFilter = (role: RoleType) => setActiveRoleFilters(
+    activeRoleFilters.includes(role)
+      ? activeRoleFilters.filter((r) => r !== role)
+      : [...activeRoleFilters, role]
+  )
+  const handleBatchConfirm = () => {
+    batchConfirmByProject(id!)
+    setToastVisible(true)
+    setTimeout(() => setToastVisible(false), 2000)
   }
 
   return (
@@ -152,21 +193,15 @@ export default function Timeline() {
           <h1 className="text-sm font-medium truncate">{project?.name ?? '事件时间线'}</h1>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={toggleOpinionPanel}
+          <button onClick={toggleOpinionPanel}
             className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs transition-colors ${
               opinionPanelOpen ? 'bg-accent/15 text-accent' : 'bg-dark-700 text-dark-300 hover:text-dark-100'
-            }`}
-          >
-            <Users size={14} />
-            观点分层
+            }`}>
+            <Users size={14} />观点分层
           </button>
-          <button
-            onClick={() => navigate(`/project/${id}/report`)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs bg-dark-700 text-dark-300 hover:text-dark-100 transition-colors"
-          >
-            <FileText size={14} />
-            复盘输出
+          <button onClick={() => navigate(`/project/${id}/report`)}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs bg-dark-700 text-dark-300 hover:text-dark-100 transition-colors">
+            <FileText size={14} />复盘输出
           </button>
         </div>
       </header>
@@ -203,7 +238,6 @@ export default function Timeline() {
               const isLeft = idx % 2 === 0
               const isExpanded = expandedId === event.id
               const NodeIcon = NODE_ICON_MAP[event.nodeType]
-              const isAnimated = event.nodeType === 'breakout' || event.nodeType === 're_ferment'
 
               return (
                 <div key={event.id} className={`flex items-start mb-8 animate-fade-in-up ${isLeft ? 'flex-row' : 'flex-row-reverse'}`}>
@@ -257,29 +291,140 @@ export default function Timeline() {
       {opinionPanelOpen && (
         <div className="fixed top-0 right-0 h-full w-[380px] bg-dark-800 border-l border-dark-600 z-50 animate-slide-in-right flex flex-col">
           <div className="flex items-center justify-between px-4 h-12 border-b border-dark-600 shrink-0">
-            <h2 className="text-sm font-medium">观点分层</h2>
-            <button onClick={toggleOpinionPanel} className="p-1.5 rounded-md hover:bg-dark-700 transition-colors">
-              <X size={16} />
-            </button>
+            <div className="flex items-center gap-2">
+              <h2 className="text-sm font-medium">观点分层</h2>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-dark-600 text-dark-300">
+                筛选后 {filteredOpinions.length} 条
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={handleBatchConfirm}
+                className="flex items-center gap-1 px-2 py-1 rounded-md text-[10px] bg-success/15 text-success hover:bg-success/25 transition-colors"
+              >
+                <Check size={11} />
+                全部确认
+              </button>
+              <button onClick={toggleOpinionPanel} className="p-1.5 rounded-md hover:bg-dark-700 transition-colors">
+                <X size={16} />
+              </button>
+            </div>
           </div>
 
-          <div className="px-4 py-3 border-b border-dark-600 shrink-0">
-            <div className="flex flex-wrap gap-2">
+          {toastVisible && (
+            <div className="absolute top-14 right-4 z-60 animate-fade-in-up">
+              <div className="bg-success/90 text-white text-[11px] px-3 py-1.5 rounded-md shadow-lg flex items-center gap-1">
+                <Check size={12} />
+                批量确认成功
+              </div>
+            </div>
+          )}
+
+          <div className="px-4 py-3 border-b border-dark-600 shrink-0 space-y-2.5">
+            <div className="flex flex-wrap gap-1.5">
               {ALL_ROLES.map((role) => (
                 <button
                   key={role}
                   onClick={() => toggleRoleFilter(role)}
-                  className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-md border transition-colors ${
+                  className={`flex items-center gap-1.5 text-[11px] px-2 py-1 rounded-md border transition-colors ${
                     activeRoleFilters.includes(role)
                       ? 'border-accent bg-accent/10 text-accent'
                       : 'border-dark-600 text-dark-400 hover:text-dark-200'
                   }`}
                 >
-                  <span className={`w-2 h-2 rounded-full ${activeRoleFilters.includes(role) ? 'bg-accent' : 'bg-dark-500'}`} />
+                  <span className={`w-1.5 h-1.5 rounded-full ${activeRoleFilters.includes(role) ? 'bg-accent' : 'bg-dark-500'}`} />
                   {ROLE_LABELS[role]}
                   <span className="text-dark-500">{roleCounts[role]}</span>
                 </button>
               ))}
+            </div>
+
+            <div className="flex flex-wrap gap-1.5">
+              {SENTIMENT_FILTERS.map((sf) => (
+                <button
+                  key={sf.key}
+                  onClick={() => setOpinionFilter({ sentiment: sf.key })}
+                  className={`text-[11px] px-2.5 py-1 rounded-full transition-colors ${
+                    opinionFilter.sentiment === sf.key
+                      ? sf.key === 'positive'
+                        ? 'bg-success/20 text-success'
+                        : sf.key === 'negative'
+                          ? 'bg-breakout/20 text-breakout'
+                          : sf.key === 'neutral'
+                            ? 'bg-dark-500/40 text-dark-200'
+                            : 'bg-accent/20 text-accent'
+                      : 'bg-dark-700 text-dark-400 hover:text-dark-200'
+                  }`}
+                >
+                  {sf.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex items-center gap-2">
+              <select
+                value={opinionFilter.platform}
+                onChange={(e) => setOpinionFilter({ platform: e.target.value })}
+                className="text-[11px] bg-dark-700 border border-dark-600 rounded-md px-2 py-1 text-dark-300 outline-none flex-1 min-w-0"
+              >
+                <option value="">全部平台</option>
+                {uniquePlatforms.map((p) => (
+                  <option key={p} value={p}>{p}</option>
+                ))}
+              </select>
+              <select
+                value={opinionFilter.confirmed}
+                onChange={(e) => setOpinionFilter({ confirmed: e.target.value as 'all' | 'confirmed' | 'unconfirmed' })}
+                className="text-[11px] bg-dark-700 border border-dark-600 rounded-md px-2 py-1 text-dark-300 outline-none flex-1 min-w-0"
+              >
+                {CONFIRMED_FILTERS.map((cf) => (
+                  <option key={cf.key} value={cf.key}>确认状态: {cf.label}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex justify-end">
+              <button onClick={() => { resetOpinionFilter(); setActiveRoleFilters([]) }}
+                className="text-[11px] px-2.5 py-1 rounded-md bg-dark-700 text-dark-400 hover:text-dark-200 transition-colors">
+                重置筛选
+              </button>
+            </div>
+          </div>
+
+          <div className="px-4 py-2.5 border-b border-dark-600 shrink-0">
+            <div className="grid grid-cols-5 gap-1.5">
+              {ALL_ROLES.map((role) => {
+                const stat = roleSentimentStats[role]
+                const posPct = stat.total > 0 ? Math.round((stat.positive / stat.total) * 100) : 0
+                const neuPct = stat.total > 0 ? Math.round((stat.neutral / stat.total) * 100) : 0
+                const negPct = stat.total > 0 ? 100 - posPct - neuPct : 0
+                return (
+                  <div key={role} className="bg-dark-700/50 rounded-md p-1.5 border border-dark-600/50">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="text-[9px] text-dark-400 truncate">{ROLE_LABELS[role]}</span>
+                      <span className="text-[9px] text-dark-500">{stat.total}</span>
+                    </div>
+                    <div className="h-1.5 w-full rounded-full overflow-hidden flex bg-dark-600">
+                      {stat.total > 0 && (
+                        <>
+                          {posPct > 0 && <div className="h-full" style={{ width: `${posPct}%`, backgroundColor: '#3FB950' }} />}
+                          {neuPct > 0 && <div className="h-full" style={{ width: `${neuPct}%`, backgroundColor: '#30363D' }} />}
+                          {negPct > 0 && <div className="h-full" style={{ width: `${negPct}%`, backgroundColor: '#F85149' }} />}
+                        </>
+                      )}
+                    </div>
+                    <div className="flex justify-between mt-1">
+                      {stat.total > 0 ? (
+                        <>
+                          <span className="text-[8px]" style={{ color: '#3FB950' }}>{posPct}%</span>
+                          <span className="text-[8px] text-dark-500">{neuPct}%</span>
+                          <span className="text-[8px]" style={{ color: '#F85149' }}>{negPct}%</span>
+                        </>
+                      ) : <span className="text-[8px] text-dark-600 w-full text-center">--</span>}
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           </div>
 
@@ -295,7 +440,10 @@ export default function Timeline() {
                   </div>
                   <div className="space-y-2">
                     {items.map((item) => (
-                      <div key={item.id} className="bg-dark-700/50 rounded-lg p-3 border border-dark-600/50">
+                      <div
+                        key={item.id}
+                        className={`bg-dark-700/50 rounded-lg p-3 border border-dark-600/50 ${!item.confirmed ? 'border-l-2 border-l-ferment' : ''}`}
+                      >
                         <div className="flex items-center justify-between mb-1.5">
                           <div className="flex items-center gap-2">
                             <span className="text-xs font-medium">{item.author}</span>
@@ -335,6 +483,11 @@ export default function Timeline() {
                 </div>
               )
             })}
+            {filteredOpinions.length === 0 && (
+              <div className="text-center py-8 text-dark-500 text-xs">
+                暂无匹配的观点数据
+              </div>
+            )}
           </div>
         </div>
       )}
