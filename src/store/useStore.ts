@@ -472,8 +472,6 @@ export const useStore = create<StoreState>((set, get) => ({
 
   clearViewDraft: () => set({
     viewDraftId: null,
-    manualAnalysisText: '',
-    insertedInsights: [],
   }),
 
   deleteDraftById: (draftId) => {
@@ -485,8 +483,8 @@ export const useStore = create<StoreState>((set, get) => ({
         reportDrafts: s.reportDrafts.filter((d) => d.id !== draftId),
         currentDraftId: wasCurrent ? null : s.currentDraftId,
         viewDraftId: wasViewing ? null : s.viewDraftId,
-        manualAnalysisText: wasViewing ? '' : s.manualAnalysisText,
-        insertedInsights: wasViewing ? [] : s.insertedInsights,
+        manualAnalysisText: wasViewing ? s.manualAnalysisText : s.manualAnalysisText,
+        insertedInsights: wasViewing ? s.insertedInsights : s.insertedInsights,
       }
       persistState({ ...s, ...next })
       return next

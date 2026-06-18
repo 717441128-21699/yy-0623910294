@@ -57,7 +57,7 @@ export default function Report() {
   const saveDraft = useStore(s=>s.saveReportDraft); const setDraftId = useStore(s=>s.setCurrentDraftId)
   const getDraftByProj = useStore(s=>s.getDraftByProject); const getProj = useStore(s=>s.getProjectById)
   const manualText = useStore(s=>s.manualAnalysisText); const setManual = useStore(s=>s.setManualAnalysis)
-  const ins = useStore(s=>s.insertedInsights); const viewDraftId = useStore(s=>s.viewDraftId)
+  const ins = useStore(s=>s.insertedInsights); const addIns = useStore(s=>s.addInsertedInsights); const viewDraftId = useStore(s=>s.viewDraftId)
   const clearView = useStore(s=>s.clearViewDraft); const switchDraft = useStore(s=>s.switchToDraft)
   const delDraft = useStore(s=>s.deleteDraftById); const getDrafts = useStore(s=>s.getDraftsByProject)
   const reportDrafts = useStore(s=>s.reportDrafts)
@@ -95,8 +95,9 @@ export default function Report() {
   }, [viewDraftId, sel, project])
   const buildExportText = useMemo(() => {
     if (!project) return ''
+    if (viewingDraft && viewingDraft.outlineText) return viewingDraft.outlineText
     const L: string[] = [project.name, '']
-    const full = isGen || viewDraftId != null
+    const full = isGen
     if (sel.length === 0 && !full) { L.push('暂无选中素材'); return L.join('\n') }
     sects.forEach((s, i) => {
       L.push(`${NN[i]}、${s.t}`)
@@ -135,6 +136,10 @@ export default function Report() {
     if(draft) {
       setIsGen(true); setGenAt(draft.generatedAt); setTemplate(draft.template)
       materials.forEach(m => { const s = draft.materialIds.includes(m.id); if(m.selected !== s) setMatSel(m.id, s) })
+      if (draft.manualAnalysis) setManual(draft.manualAnalysis)
+      if (draft.insertedInsightsSection) {
+        try { const parsed = JSON.parse(draft.insertedInsightsSection); if (Array.isArray(parsed)) addIns(parsed) } catch {}
+      }
       setDraftNotice(true)
     }
   }, [id])

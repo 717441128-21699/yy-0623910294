@@ -163,7 +163,11 @@ export default function ProjectList() {
     const { fieldMappings, rawProject } = preview
     const root = { project: rawProject }
     const pd: any = {}
-    fieldMappings.forEach(m => { if (m.userTarget !== 'ignore' || !m.userField) return; const v = getVal(root, m.sourceKey); if (v != null) pd[m.userField] = v })
+    fieldMappings.forEach(m => {
+      if (m.userTarget === 'ignore' || m.userTarget === 'event' || m.userTarget === 'opinion' || m.userTarget === 'material' || !m.userField) return
+      const v = getVal(root, m.sourceKey)
+      if (v != null) pd[m.userField] = v
+    })
     const pid = `proj-${Date.now()}`
     return { id: pid, name: pd.name ? String(pd.name) : '未命名项目', scenicSpot: pd.scenicSpot ? String(pd.scenicSpot) : '', activityType: ACTIVITY_TYPES.includes(pd.activityType) ? pd.activityType : '其他', startDate: pd.startDate ? String(pd.startDate) : '', endDate: pd.endDate ? String(pd.endDate) : '', status: pd.status === 'completed' ? 'completed' : 'analyzing', heatIndex: typeof pd.heatIndex === 'number' ? pd.heatIndex : 60, tags: Array.isArray(pd.tags) ? pd.tags.map(String) : [] }
   }
