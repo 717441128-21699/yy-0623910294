@@ -4,12 +4,12 @@ import { useState, useMemo } from 'react'
 import {
   ArrowLeft, Users, MessageSquare, TrendingUp, TrendingDown, Minus,
   Flame, Snowflake, RefreshCw, Radio, Share2, Newspaper, Shield,
-  X, Check, FileText, Lightbulb, ChevronDown, ChevronRight, Target, AlertTriangle, Zap
+  X, Check, FileText, Lightbulb, ChevronDown, ChevronRight, Target, AlertTriangle, Zap, ArrowDownToLine
 } from 'lucide-react'
 import {
   AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer, ReferenceLine,
 } from 'recharts'
-import type { TimelineEvent, RoleType, NodeType, SentimentType } from '@/types'
+import type { TimelineEvent, RoleType, NodeType, SentimentType, InsertedInsight } from '@/types'
 import { ROLE_LABELS, NODE_TYPE_LABELS, SENTIMENT_LABELS } from '@/types'
 const NODE_ICON_MAP: Record<NodeType, React.ElementType> = {
   breakout: Flame, cooldown: Snowflake, re_ferment: RefreshCw,
@@ -118,13 +118,14 @@ export default function Timeline() {
     opinionPanelOpen, toggleOpinionPanel, activeRoleFilters, setActiveRoleFilters,
     confirmOpinionItem, updateOpinionItem,
     opinionFilter, setOpinionFilter, resetOpinionFilter, batchConfirmByProject,
-    generateOpinionInsights,
+    generateOpinionInsights, insertedInsights, addInsertedInsights,
   } = useStore()
 
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [toastVisible, setToastVisible] = useState(false)
   const [insightsExpanded, setInsightsExpanded] = useState(false)
   const [expandedRoles, setExpandedRoles] = useState<Set<RoleType>>(new Set())
+  const [insertToastVisible, setInsertToastVisible] = useState(false)
 
   const ChevronIcon = ({ e, s = 12 }: { e: boolean; s?: number }) =>
     e ? <ChevronDown size={s} className="text-dark-400" /> : <ChevronRight size={s} className="text-dark-400" />
@@ -185,6 +186,25 @@ export default function Timeline() {
     () => generateOpinionInsights(id!, filteredOpinions),
     [id, filteredOpinions, generateOpinionInsights]
   )
+  const hasAnyInsights = useMemo(() => ALL_ROLES.some((r) => {
+    const i = opinionInsights[r]; return i && (i.demands.length + i.risks.length + i.suggestions.length > 0)
+  }), [opinionInsights])
+  const insertDisabled = filteredOpinions.length === 0 || !hasAnyInsights
+  const handleInsertToReport = () => {
+    if (insertDisabled) return
+    const arr: InsertedInsight[] = ALL_ROLES.reduce((acc, role) => {
+      const insight = opinionInsights[role]
+      if (insight && (insight.demands.length > 0 || insight.risks.length > 0 || insight.suggestions.length > 0)) {
+        acc.push({ role, demands: insight.demands, risks: insight.risks, suggestions: insight.suggestions })
+      }
+      return acc
+    }, [] as InsertedInsight[])
+    if (arr.length > 0) {
+      addInsertedInsights(arr); setInsertToastVisible(true)
+      setTimeout(() => setInsertToastVisible(false), 2000)
+    }
+  }
+  const insertedRoleLabels = useMemo(() => insertedInsights.map((i) => ROLE_LABELS[i.role]), [insertedInsights])
   const roleCounts = useMemo(() => {
     const counts = {} as Record<RoleType, number>
     ALL_ROLES.forEach((r) => (counts[r] = 0))
@@ -335,6 +355,16 @@ export default function Timeline() {
             </div>
           )}
 
+          {insertToastVisible && (
+            <div className="absolute top-14 right-4 z-60 animate-fade-in-up">
+              <div className="bg-success/90 text-white text-[11px] px-3 py-1.5 rounded-md shadow-lg flex items-center gap-1">
+                <Check size={12} />
+                已插入至报告，前往复盘输出查看
+                <span onClick={() => navigate(`/project/${id}/report`)} className="underline cursor-pointer hover:text-white/90 ml-1">查看报告 →</span>
+              </div>
+            </div>
+          )}
+
           <div className="px-4 py-3 border-b border-dark-600 shrink-0 space-y-2.5">
             <div className="flex flex-wrap gap-1.5">
               {ALL_ROLES.map((role) => (
@@ -444,17 +474,36 @@ export default function Timeline() {
           </div>
 
           <div className="border-t border-dark-600 px-4 py-2.5 shrink-0">
-            <button
-              onClick={() => setInsightsExpanded(!insightsExpanded)}
-              className="w-full flex items-center justify-between text-left hover:bg-dark-700/50 rounded-md px-2 py-1.5 -mx-2 transition-colors"
-            >
-              <div className="flex items-center gap-2">
+            <div className="flex items-center justify-between gap-2 rounded-md px-2 -mx-2">
+              <button
+                onClick={() => setInsightsExpanded(!insightsExpanded)}
+                className="flex items-center gap-2 hover:bg-dark-700/50 py-1.5 px-1 -ml-1 rounded-md transition-colors"
+              >
                 <Lightbulb size={14} className="text-accent" />
                 <span className="text-sm font-medium">复盘洞察</span>
-              </div>
-              <ChevronIcon e={insightsExpanded} s={14} />
+                <ChevronIcon e={insightsExpanded} s={14} />
+              </button>
+              <button
+                onClick={handleInsertToReport}
+                disabled={insertDisabled}
+                title={insertDisabled ? '请先筛选出有效观点以生成洞察' : ''}
+                className={`flex items-center gap-1 text-[10px] px-2 py-1 rounded-md transition-colors ${insertDisabled ? 'bg-dark-700/50 text-dark-500 cursor-not-allowed' : 'bg-accent/15 text-accent hover:bg-accent/25'}`}
+              >
+                <ArrowDownToLine size={11} />
+                插入至报告
+              </button>
+            </div>
 
-            </button>
+            {insertedRoleLabels.length > 0 && (
+              <div className="flex items-center gap-1.5 mt-1.5 ml-1">
+                <span className="text-[10px] text-dark-500">已插入:</span>
+                {insertedRoleLabels.map((label, i) => (
+                  <span key={i} className="text-[10px] px-1.5 py-0.5 rounded-full bg-accent/10 text-accent">
+                    {label}
+                  </span>
+                ))}
+              </div>
+            )}
 
             {insightsExpanded && <div className="mt-2 space-y-2">
               {filteredOpinions.length === 0 ? <div className="text-center py-4 text-dark-500 text-xs">调整筛选条件后自动生成洞察</div> : (

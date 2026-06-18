@@ -1,8 +1,8 @@
 import { useStore } from '@/store/useStore'
 import { useNavigate } from 'react-router-dom'
 import { useState, useRef, ChangeEvent, DragEvent, useMemo } from 'react'
-import { FolderOpen, Plus, Search, Flame, Calendar, ChevronRight, Filter, X, MapPin, Tag, Upload, Minus, RefreshCw } from 'lucide-react'
-import type { Project, TimelineEvent, OpinionItem, ReportMaterial, NodeType, RoleType, SentimentType, MaterialType, ImportTargetType, ImportFieldPreview, ImportPreviewData } from '@/types'
+import { FolderOpen, Plus, Search, Flame, Calendar, ChevronRight, Filter, X, MapPin, Tag, Upload, Minus, RefreshCw, CheckCircle, Database } from 'lucide-react'
+import type { Project, TimelineEvent, OpinionItem, ReportMaterial, NodeType, RoleType, SentimentType, MaterialType, ImportTargetType, ImportFieldPreview, ImportPreviewData, ImportSummary } from '@/types'
 import { IMPORT_TARGET_LABELS } from '@/types'
 
 const STATUS_OPTIONS = [{ key: 'all', label: '全部' }, { key: 'analyzing', label: '分析中' }, { key: 'completed', label: '已完成' }]
@@ -22,9 +22,7 @@ const EVENT_FIELDS = ['timestamp', 'title', 'content', 'nodeType', 'sentiment', 
 const OPINION_FIELDS = ['role', 'content', 'author', 'platform', 'sentiment', 'confirmed']
 const MATERIAL_FIELDS = ['type', 'title', 'content', 'sourceEventId', 'sortOrder', 'selected']
 const FIELD_OPTS: Record<string, string[]> = { ignore: PROJECT_FIELDS, event: EVENT_FIELDS, opinion: OPINION_FIELDS, material: MATERIAL_FIELDS }
-
 function getHeatColor(h: number) { return h >= 80 ? 'text-red-400' : h >= 60 ? 'text-orange-400' : h >= 40 ? 'text-yellow-400' : 'text-green-400' }
-
 interface ER { timestamp: string; title: string; content: string; nodeType: NodeType; sentiment: SentimentType; spreadCount: number; sourceAuthor: string; role: RoleType }
 interface OR { role: RoleType; content: string; author: string; platform: string; sentiment: SentimentType }
 interface MR { type: MaterialType; title: string; content: string }
@@ -74,17 +72,62 @@ const extractFields = (obj: any, path: string[] = []): ImportFieldPreview[] => {
 }
 
 const getVal = (obj: any, p: string): any => p.split('.').reduce((acc, k) => acc?.[k], obj)
-const sProj = (r: any): Project | null => { if (!r || typeof r !== 'object') return null; const { id, name, scenicSpot, activityType, startDate, endDate, status, heatIndex, tags } = r; if (!name) return null; return { id: id || `proj-${Date.now()}`, name: String(name), scenicSpot: scenicSpot ? String(scenicSpot) : '', activityType: ACTIVITY_TYPES.includes(activityType) ? activityType : '其他', startDate: startDate ? String(startDate) : '', endDate: endDate ? String(endDate) : '', status: status === 'completed' ? 'completed' : 'analyzing', heatIndex: typeof heatIndex === 'number' ? heatIndex : 0, tags: Array.isArray(tags) ? tags.map(String) : [] } }
-const sEv = (r: any, pid: string, i: number): TimelineEvent | null => !r || typeof r !== 'object' ? null : { id: r.id || `evt-${Date.now()}-${i}`, projectId: pid, timestamp: r.timestamp ? String(r.timestamp) : '', title: r.title ? String(r.title) : '', content: r.content ? String(r.content) : '', nodeType: NODE_TYPES.includes(r.nodeType) ? r.nodeType : 'origin', sentiment: SENTIMENTS.includes(r.sentiment) ? r.sentiment : 'neutral', spreadCount: typeof r.spreadCount === 'number' ? r.spreadCount : 500, sourceType: r.sourceType ? String(r.sourceType) : '', sourceAuthor: r.sourceAuthor ? String(r.sourceAuthor) : '', role: ROLE_TYPES.includes(r.role) ? r.role : 'tourist' }
-const sOp = (r: any, pid: string, i: number): OpinionItem | null => !r || typeof r !== 'object' ? null : { id: r.id || `opi-${Date.now()}-${i}`, projectId: pid, eventId: r.eventId ? String(r.eventId) : '', role: ROLE_TYPES.includes(r.role) ? r.role : 'tourist', content: r.content ? String(r.content) : '', author: r.author ? String(r.author) : '', platform: r.platform ? String(r.platform) : '', sentiment: SENTIMENTS.includes(r.sentiment) ? r.sentiment : 'neutral', confirmed: r.confirmed === true }
-const sMa = (r: any, pid: string, i: number): ReportMaterial | null => !r || typeof r !== 'object' ? null : { id: r.id || `mat-${Date.now()}-${i}`, projectId: pid, type: MATERIAL_TYPES.includes(r.type) ? r.type : 'typical_post', title: r.title ? String(r.title) : '', content: r.content ? String(r.content) : '', sourceEventId: r.sourceEventId ? String(r.sourceEventId) : '', sortOrder: typeof r.sortOrder === 'number' ? r.sortOrder : i, selected: r.selected !== false }
+const replaceArrIdx = (sourceKey: string, idx: number): string => sourceKey.replace(/\.0\./, `.${idx}.`)
+interface ValidationResult { valid: boolean; reasons: string[]; requiredMissing: Set<string> }
+
+const validateImport = (preview: ImportPreviewData | null): ValidationResult => {
+  const reasons: string[] = []
+  const requiredMissing = new Set<string>()
+  if (!preview) return { valid: false, reasons: ['请先解析数据'], requiredMissing }
+  const { fieldMappings, rawProject, rawEvents, rawOpinions, rawMaterials } = preview
+  const projMappings = fieldMappings.filter(m => m.userTarget === 'ignore' && m.userField)
+  const nameMapping = projMappings.find(m => m.userField === 'name')
+  const nameVal = nameMapping ? String(getVal({ project: rawProject }, nameMapping.sourceKey) ?? '') : ''
+  if (!nameVal.trim()) { reasons.push('项目名称'); if (nameMapping) requiredMissing.add(nameMapping.sourceKey) }
+  const eventMappings = fieldMappings.filter(m => m.userTarget === 'event' && m.userField)
+  const opinionMappings = fieldMappings.filter(m => m.userTarget === 'opinion' && m.userField)
+  const materialMappings = fieldMappings.filter(m => m.userTarget === 'material' && m.userField)
+  const hasEvents = rawEvents.length > 0 && eventMappings.length > 0
+  const hasOpinions = rawOpinions.length > 0 && opinionMappings.length > 0
+  const hasMaterials = rawMaterials.length > 0 && materialMappings.length > 0
+  if (!hasEvents && !hasOpinions && !hasMaterials) reasons.push('至少映射一种子数据（时间线/观点/素材）')
+  if (hasEvents) {
+    const hasTimestamp = eventMappings.some(m => m.userField === 'timestamp')
+    const hasTitleOrContent = eventMappings.some(m => m.userField === 'title' || m.userField === 'content')
+    if (!hasTimestamp || !hasTitleOrContent) {
+      reasons.push('时间线需包含 时间 + 标题/内容')
+      if (!hasTimestamp) { const tm = eventMappings[0]; if (tm) requiredMissing.add(tm.sourceKey + '_evt_ts') }
+      if (!hasTitleOrContent) { const tm = eventMappings[0]; if (tm) requiredMissing.add(tm.sourceKey + '_evt_tc') }
+    }
+  }
+  if (hasOpinions) {
+    const hasRole = opinionMappings.some(m => m.userField === 'role')
+    const hasContent = opinionMappings.some(m => m.userField === 'content')
+    if (!hasRole || !hasContent) {
+      reasons.push('观点需包含 角色 + 内容')
+      if (!hasRole) { const om = opinionMappings[0]; if (om) requiredMissing.add(om.sourceKey + '_opi_r') }
+      if (!hasContent) { const om = opinionMappings[0]; if (om) requiredMissing.add(om.sourceKey + '_opi_c') }
+    }
+  }
+  if (hasMaterials) {
+    const hasType = materialMappings.some(m => m.userField === 'type')
+    const hasTitle = materialMappings.some(m => m.userField === 'title')
+    if (!hasType || !hasTitle) {
+      reasons.push('素材需包含 类型 + 标题')
+      if (!hasType) { const mm = materialMappings[0]; if (mm) requiredMissing.add(mm.sourceKey + '_mat_t') }
+      if (!hasTitle) { const mm = materialMappings[0]; if (mm) requiredMissing.add(mm.sourceKey + '_mat_ti') }
+    }
+  }
+  return { valid: reasons.length === 0, reasons, requiredMissing }
+}
 
 export default function ProjectList() {
   const nav = useNavigate()
-  const { projects, selectedFilters, setSelectedFilters, addProject, importProject, resetStore, importPreview, setImportPreview, updateFieldMapping } = useStore()
+  const { projects, selectedFilters, setSelectedFilters, addProject, importProject, resetStore, importPreview, setImportPreview, updateFieldMapping, importSummary, setImportSummary } = useStore()
   const [search, setSearch] = useState('')
   const [showModal, setShowModal] = useState(false)
   const [showImp, setShowImp] = useState(false)
+  const [showSum, setShowSum] = useState(false)
   const [form, setForm] = useState({ name: '', scenicSpot: '', activityType: '黄金周' as typeof ACTIVITY_TYPES[number], startDate: '', endDate: '' })
   const [tab, setTab] = useState<'paste' | 'file' | 'form'>('paste')
   const [pt, setPt] = useState('')
@@ -93,92 +136,118 @@ export default function ProjectList() {
   const [fc, setFc] = useState('')
   const [fErr, setFErr] = useState('')
   const [iErr, setIErr] = useState('')
+  const [lastProjName, setLastProjName] = useState('')
+  const [newProjId, setNewProjId] = useState('')
   const fir = useRef<HTMLInputElement>(null)
   const [fp, setFp] = useState({ name: '', scenicSpot: '', activityType: '黄金周' as typeof ACTIVITY_TYPES[number], startDate: '', endDate: '' })
   const [ers, setErs] = useState<ER[]>(Array.from({ length: 5 }, eER))
   const [ors, setOrs] = useState<OR[]>(Array.from({ length: 5 }, eOR))
   const [mrs, setMrs] = useState<MR[]>(Array.from({ length: 3 }, eMR))
-
   const filtered = projects.filter(p => (selectedFilters.status === 'all' || p.status === selectedFilters.status) && (!search || p.name.includes(search) || p.scenicSpot.includes(search))).sort((a, b) => selectedFilters.sortBy === 'heat' ? b.heatIndex - a.heatIndex : +new Date(b.startDate) - +new Date(a.startDate))
-  const handleCreate = () => { const id = `proj-${Date.now()}`; addProject({ id, ...form, status: 'analyzing', heatIndex: 0, tags: [form.activityType, form.scenicSpot] }); setShowModal(false); setForm({ name: '', scenicSpot: '', activityType: '黄金周', startDate: '', endDate: '' }); nav(`/project/${id}`) }
-
-  const proc = (raw: any) => {
-    const project = sProj(raw?.project); if (!project) return null
-    const pid = project.id, events: TimelineEvent[] = [], opinions: OpinionItem[] = [], materials: ReportMaterial[] = []
-    if (Array.isArray(raw?.events)) raw.events.forEach((e: any, i: number) => { const ev = sEv(e, pid, i); if (ev) events.push(ev) })
-    if (Array.isArray(raw?.opinions)) raw.opinions.forEach((o: any, i: number) => { const op = sOp(o, pid, i); if (op) opinions.push(op) })
-    if (Array.isArray(raw?.materials)) raw.materials.forEach((m: any, i: number) => { const ma = sMa(m, pid, i); if (ma) materials.push(ma) })
-    return { project, events, opinions, materials }
-  }
-  const rst = () => { setTab('paste'); setPt(''); setPtErr(''); setFn(''); setFc(''); setFErr(''); setIErr(''); setFp({ name: '', scenicSpot: '', activityType: '黄金周', startDate: '', endDate: '' }); setErs(Array.from({ length: 5 }, eER)); setOrs(Array.from({ length: 5 }, eOR)); setMrs(Array.from({ length: 3 }, eMR)); setImportPreview(null) }
-  const doImp = (payload: any) => { const id = importProject(payload); setShowImp(false); rst(); nav(`/project/${id}`) }
+  const handleCreate = () => { const id = `proj-${Date.now()}`; addProject({ id, ...form, status: 'analyzing', heatIndex: 0, tags: [form.activityType, form.scenicSpot].filter(Boolean) }); setShowModal(false); setForm({ name: '', scenicSpot: '', activityType: '黄金周', startDate: '', endDate: '' }); nav(`/project/${id}`) }
   const buildPreview = (raw: any): ImportPreviewData | null => {
     if (!raw || typeof raw !== 'object') return null
-    return {
-      rawProject: raw.project || {},
-      rawEvents: Array.isArray(raw.events) ? raw.events : [],
-      rawOpinions: Array.isArray(raw.opinions) ? raw.opinions : [],
-      rawMaterials: Array.isArray(raw.materials) ? raw.materials : [],
-      fieldMappings: extractFields(raw),
-    }
+    return { rawProject: raw.project || {}, rawEvents: Array.isArray(raw.events) ? raw.events : [], rawOpinions: Array.isArray(raw.opinions) ? raw.opinions : [], rawMaterials: Array.isArray(raw.materials) ? raw.materials : [], fieldMappings: extractFields(raw) }
   }
+  const validation = useMemo(() => validateImport(importPreview), [importPreview])
+  const rst = () => { setTab('paste'); setPt(''); setPtErr(''); setFn(''); setFc(''); setFErr(''); setIErr(''); setFp({ name: '', scenicSpot: '', activityType: '黄金周', startDate: '', endDate: '' }); setErs(Array.from({ length: 5 }, eER)); setOrs(Array.from({ length: 5 }, eOR)); setMrs(Array.from({ length: 3 }, eMR)); setImportPreview(null); setImportSummary(null) }
+  const remap = () => { if (!importPreview) return; const p = buildPreview({ project: importPreview.rawProject, events: importPreview.rawEvents, opinions: importPreview.rawOpinions, materials: importPreview.rawMaterials }); if (p) setImportPreview(p) }
+  const cancelPreview = () => setImportPreview(null)
   const hPaste = () => { setIErr(''); setPtErr(''); try { const raw = JSON.parse(pt); const p = buildPreview(raw); if (!p) { setPtErr('解析失败：无效的 JSON 数据'); return } setImportPreview(p) } catch (e: any) { setPtErr(e?.message || 'JSON 格式错误') } }
   const readF = (f: File) => { setFn(f.name); setFErr(''); setIErr(''); const rd = new FileReader(); rd.onload = () => setFc(String(rd.result || '')); rd.onerror = () => setFErr('文件读取失败'); rd.readAsText(f) }
   const hFC = (e: ChangeEvent<HTMLInputElement>) => { const f = e.target.files?.[0]; if (f) readF(f) }
   const hDrop = (e: DragEvent<HTMLDivElement>) => { e.preventDefault(); const f = e.dataTransfer.files?.[0]; if (f) readF(f) }
   const hFile = () => { setIErr(''); setFErr(''); try { const raw = JSON.parse(fc); const p = buildPreview(raw); if (!p) { setFErr('解析失败：无效的 JSON 数据'); return } setImportPreview(p) } catch (e: any) { setFErr(e?.message || 'JSON 格式错误') } }
-  const remap = () => { if (!importPreview) return; const p = buildPreview({ project: importPreview.rawProject, events: importPreview.rawEvents, opinions: importPreview.rawOpinions, materials: importPreview.rawMaterials }); if (p) setImportPreview(p) }
-  const cancelPreview = () => setImportPreview(null)
 
-  const canConfirm = useMemo(() => {
-    if (!importPreview) return false
-    const hasName = importPreview.fieldMappings.some(m => (m.userTarget === 'ignore' && m.userField === 'name') || (m.sourceKey === 'project.name' && m.userField))
-    return hasName || !!importPreview.rawProject?.name
-  }, [importPreview])
-
-  const confirmImport = () => {
-    if (!importPreview || !canConfirm) return
-    const { rawProject, rawEvents, rawOpinions, rawMaterials, fieldMappings } = importPreview
-    const pd: any = { ...rawProject }, ed: any[] = rawEvents.length ? rawEvents.map(e => ({ ...e })) : [{}], od: any[] = rawOpinions.length ? rawOpinions.map(o => ({ ...o })) : [{}], md: any[] = rawMaterials.length ? rawMaterials.map(m => ({ ...m })) : [{}]
-    const root = { project: rawProject, events: rawEvents, opinions: rawOpinions, materials: rawMaterials }
-    fieldMappings.forEach(m => {
-      if (m.userField === null) return
-      const v = getVal(root, m.sourceKey); if (v == null) return
-      const parts = m.sourceKey.split('.'), isArr = parts.some(p => !isNaN(Number(p)))
-      const arrIdx = isArr ? parseInt(parts.find(p => !isNaN(Number(p))) || '0') : 0
-      if (m.userTarget === 'ignore') pd[m.userField!] = v
-      else if (m.userTarget === 'event') isArr && ed[arrIdx] ? ed[arrIdx][m.userField!] = v : ed.forEach(e => e[m.userField!] = v)
-      else if (m.userTarget === 'opinion') isArr && od[arrIdx] ? od[arrIdx][m.userField!] = v : od.forEach(o => o[m.userField!] = v)
-      else if (m.userTarget === 'material') isArr && md[arrIdx] ? md[arrIdx][m.userField!] = v : md.forEach(m => m[m.userField!] = v)
-    })
+  const buildProjectFromMappings = (preview: ImportPreviewData): Project => {
+    const { fieldMappings, rawProject } = preview
+    const root = { project: rawProject }
+    const pd: any = {}
+    fieldMappings.forEach(m => { if (m.userTarget !== 'ignore' || !m.userField) return; const v = getVal(root, m.sourceKey); if (v != null) pd[m.userField] = v })
     const pid = `proj-${Date.now()}`
-    const project = sProj({ ...pd, id: pid }); if (!project) { setIErr('缺少有效的项目名称'); return }
-    const events: TimelineEvent[] = [], opinions: OpinionItem[] = [], materials: ReportMaterial[] = []
-    ed.forEach((e, i) => { if (e.title || e.content || e.timestamp) { const ev = sEv(e, pid, i); if (ev) events.push(ev) } })
-    od.forEach((o, i) => { if (o.content) { const op = sOp(o, pid, i); if (op) opinions.push(op) } })
-    md.forEach((m, i) => { if (m.title || m.content) { const ma = sMa(m, pid, i); if (ma) materials.push(ma) } })
-    doImp({ project, events, opinions, materials })
+    return { id: pid, name: pd.name ? String(pd.name) : '未命名项目', scenicSpot: pd.scenicSpot ? String(pd.scenicSpot) : '', activityType: ACTIVITY_TYPES.includes(pd.activityType) ? pd.activityType : '其他', startDate: pd.startDate ? String(pd.startDate) : '', endDate: pd.endDate ? String(pd.endDate) : '', status: pd.status === 'completed' ? 'completed' : 'analyzing', heatIndex: typeof pd.heatIndex === 'number' ? pd.heatIndex : 60, tags: Array.isArray(pd.tags) ? pd.tags.map(String) : [] }
   }
 
-  const previewCounts = useMemo(() => {
-    if (!importPreview) return { project: 0, events: 0, opinions: 0, materials: 0 }
-    return {
-      project: importPreview.fieldMappings.filter(m => m.userTarget === 'ignore' && m.userField).length,
-      events: importPreview.fieldMappings.filter(m => m.userTarget === 'event').length,
-      opinions: importPreview.fieldMappings.filter(m => m.userTarget === 'opinion').length,
-      materials: importPreview.fieldMappings.filter(m => m.userTarget === 'material').length
-    }
-  }, [importPreview])
+  const buildEventsFromMappings = (preview: ImportPreviewData, pid: string): TimelineEvent[] => {
+    const { fieldMappings, rawEvents } = preview
+    const eventMappings = fieldMappings.filter(m => m.userTarget === 'event' && m.userField)
+    if (!eventMappings.length || !rawEvents.length) return []
+    const events: TimelineEvent[] = []
+    rawEvents.forEach((_rawEv, i) => {
+      const root = { events: rawEvents }
+      const ed: any = {}
+      eventMappings.forEach(m => { const sk = replaceArrIdx(m.sourceKey, i); const v = getVal(root, sk); if (v != null) ed[m.userField!] = v })
+      events.push({ id: `evt-${Date.now()}-${i}`, projectId: pid, timestamp: ed.timestamp ? String(ed.timestamp) : '', title: ed.title ? String(ed.title) : '', content: ed.content ? String(ed.content) : '', nodeType: NODE_TYPES.includes(ed.nodeType) ? ed.nodeType : 'spread', sentiment: SENTIMENTS.includes(ed.sentiment) ? ed.sentiment : 'neutral', spreadCount: typeof ed.spreadCount === 'number' ? ed.spreadCount : 100, sourceType: ed.sourceType ? String(ed.sourceType) : '', sourceAuthor: ed.sourceAuthor ? String(ed.sourceAuthor) : '', role: ROLE_TYPES.includes(ed.role) ? ed.role : 'tourist' })
+    })
+    return events
+  }
+
+  const buildOpinionsFromMappings = (preview: ImportPreviewData, pid: string): OpinionItem[] => {
+    const { fieldMappings, rawOpinions } = preview
+    const opinionMappings = fieldMappings.filter(m => m.userTarget === 'opinion' && m.userField)
+    if (!opinionMappings.length || !rawOpinions.length) return []
+    const opinions: OpinionItem[] = []
+    rawOpinions.forEach((_rawOp, i) => {
+      const root = { opinions: rawOpinions }
+      const od: any = {}
+      opinionMappings.forEach(m => { const sk = replaceArrIdx(m.sourceKey, i); const v = getVal(root, sk); if (v != null) od[m.userField!] = v })
+      opinions.push({ id: `opi-${Date.now()}-${i}`, projectId: pid, eventId: od.eventId ? String(od.eventId) : '', role: ROLE_TYPES.includes(od.role) ? od.role : 'tourist', content: od.content ? String(od.content) : '', author: od.author ? String(od.author) : '', platform: od.platform ? String(od.platform) : '其他', sentiment: SENTIMENTS.includes(od.sentiment) ? od.sentiment : 'neutral', confirmed: od.confirmed === true })
+    })
+    return opinions
+  }
+
+  const buildMaterialsFromMappings = (preview: ImportPreviewData, pid: string): ReportMaterial[] => {
+    const { fieldMappings, rawMaterials } = preview
+    const materialMappings = fieldMappings.filter(m => m.userTarget === 'material' && m.userField)
+    if (!materialMappings.length || !rawMaterials.length) return []
+    const materials: ReportMaterial[] = []
+    rawMaterials.forEach((_rawMa, i) => {
+      const root = { materials: rawMaterials }
+      const md: any = {}
+      materialMappings.forEach(m => { const sk = replaceArrIdx(m.sourceKey, i); const v = getVal(root, sk); if (v != null) md[m.userField!] = v })
+      materials.push({ id: `mat-${Date.now()}-${i}`, projectId: pid, type: MATERIAL_TYPES.includes(md.type) ? md.type : 'typical_post', title: md.title ? String(md.title) : '', content: md.content ? String(md.content) : '', sourceEventId: md.sourceEventId ? String(md.sourceEventId) : '', sortOrder: typeof md.sortOrder === 'number' ? md.sortOrder : i, selected: md.selected !== false })
+    })
+    return materials
+  }
+
+  const confirmImport = () => {
+    if (!importPreview || !validation.valid) return
+    const project = buildProjectFromMappings(importPreview)
+    const events = buildEventsFromMappings(importPreview, project.id)
+    const opinions = buildOpinionsFromMappings(importPreview, project.id)
+    const materials = buildMaterialsFromMappings(importPreview, project.id)
+    const id = importProject({ project, events, opinions, materials })
+    const summary: ImportSummary = { events: events.length, opinions: opinions.length, materials: materials.length }
+    setImportSummary(summary); setLastProjName(project.name); setNewProjId(id); setShowSum(true)
+  }
+
+  const closeSumAndNav = () => { const id = newProjId; setShowSum(false); setShowImp(false); rst(); if (id) nav(`/project/${id}`) }
+  const closeSumAndStay = () => { setShowSum(false); setImportSummary(null); rst() }
 
   const hForm = () => {
     setIErr(''); if (!fp.name.trim()) { setIErr('请填写项目名称'); return }
     const pid = `proj-${Date.now()}`
-    const project: Project = { id: pid, name: fp.name, scenicSpot: fp.scenicSpot, activityType: fp.activityType, startDate: fp.startDate, endDate: fp.endDate, status: 'analyzing', heatIndex: 0, tags: [fp.activityType, fp.scenicSpot].filter(Boolean) }
+    const project: Project = { id: pid, name: fp.name, scenicSpot: fp.scenicSpot, activityType: fp.activityType, startDate: fp.startDate, endDate: fp.endDate, status: 'analyzing', heatIndex: 60, tags: [fp.activityType, fp.scenicSpot].filter(Boolean) }
     const events = ers.filter(r => r.title || r.content).map((r, i) => ({ id: `evt-${Date.now()}-${i}`, projectId: pid, timestamp: r.timestamp, title: r.title, content: r.content, nodeType: r.nodeType, sentiment: r.sentiment, spreadCount: r.spreadCount, sourceType: '', sourceAuthor: r.sourceAuthor, role: r.role }))
     const opinions = ors.filter(r => r.content).map((r, i) => ({ id: `opi-${Date.now()}-${i}`, projectId: pid, eventId: '', role: r.role, content: r.content, author: r.author, platform: r.platform, sentiment: r.sentiment, confirmed: false }))
     const materials = mrs.filter(r => r.title || r.content).map((r, i) => ({ id: `mat-${Date.now()}-${i}`, projectId: pid, type: r.type, title: r.title, content: r.content, sourceEventId: '', sortOrder: i, selected: true }))
-    doImp({ project, events, opinions, materials })
+    importProject({ project, events, opinions, materials })
+    setImportSummary({ events: events.length, opinions: opinions.length, materials: materials.length }); setLastProjName(project.name); setNewProjId(pid); setShowSum(true)
   }
+
+  const previewCounts = useMemo(() => {
+    if (!importPreview) return { project: 0, events: 0, opinions: 0, materials: 0 }
+    return { project: importPreview.fieldMappings.filter(m => m.userTarget === 'ignore' && m.userField).length, events: importPreview.fieldMappings.filter(m => m.userTarget === 'event').length, opinions: importPreview.fieldMappings.filter(m => m.userTarget === 'opinion').length, materials: importPreview.fieldMappings.filter(m => m.userTarget === 'material').length }
+  }, [importPreview])
+
+  const isFieldRowMissingRequired = (field: ImportFieldPreview): boolean => validation.requiredMissing.has(field.sourceKey)
+  const confirmBtnText = validation.valid ? '确认导入并创建项目' : '字段不完整'
+  const canConfirmBtn = validation.valid
+  const FORM_SECTIONS = [
+    { title: '时间线节点', rows: ers, setRows: setErs, mk: eER, cols: [{ k: 'timestamp', t: 'datetime-local', p: '时间', c: 2 }, { k: 'title', t: 'text', p: '标题', c: 2 }, { k: 'content', t: 'text', p: '内容', c: 3 }, { k: 'nodeType', t: 'select', opts: NODE_TYPES.map(v => ({ v, l: NL[v] })), c: 1 }, { k: 'sentiment', t: 'select', opts: SENTIMENTS.map(v => ({ v, l: SL[v] })), c: 1 }, { k: 'spreadCount', t: 'number', p: '传播量', c: 1 }, { k: 'sourceAuthor', t: 'text', p: '作者', c: 1 }, { k: 'role', t: 'select', opts: ROLE_TYPES.map(v => ({ v, l: RL[v] })), c: 1 }], mh: 'max-h-64' },
+    { title: '观点', rows: ors, setRows: setOrs, mk: eOR, cols: [{ k: 'role', t: 'select', opts: ROLE_TYPES.map(v => ({ v, l: RL[v] })), c: 2 }, { k: 'content', t: 'text', p: '内容', c: 5 }, { k: 'author', t: 'text', p: '作者', c: 2 }, { k: 'platform', t: 'text', p: '平台', c: 2 }, { k: 'sentiment', t: 'select', opts: SENTIMENTS.map(v => ({ v, l: SL[v] })), c: 1 }], mh: 'max-h-56' },
+    { title: '复盘素材', rows: mrs, setRows: setMrs, mk: eMR, cols: [{ k: 'type', t: 'select', opts: MATERIAL_TYPES.map(v => ({ v, l: ML[v] })), c: 2 }, { k: 'title', t: 'text', p: '标题', c: 3 }, { k: 'content', t: 'text', p: '内容', c: 6 }], mh: 'max-h-48' }
+  ] as any[]
 
   return (
     <div className="min-h-screen bg-dark-900 pb-20">
@@ -261,37 +330,46 @@ export default function ProjectList() {
             </div>
             <div className="flex-1 overflow-y-auto px-6 py-4">
               {iErr && !importPreview && <div className="mb-4 p-3 rounded-lg bg-breakout/15 border border-breakout text-breakout text-sm">{iErr}</div>}
-              {tab === 'paste' && !importPreview && (<div className="space-y-3"><textarea value={pt} onChange={e => { setPt(e.target.value); setPtErr('') }} placeholder={SAMPLE_JSON} rows={12} className={`w-full px-3 py-2 bg-dark-700 border rounded-lg text-sm text-dark-100 placeholder:text-dark-500 focus:outline-none transition-colors font-mono resize-none ${ptErr ? 'border-breakout focus:border-breakout' : 'border-dark-600 focus:border-accent'}`} />{ptErr && <p className="text-sm text-breakout">{ptErr}</p>}</div>)}
+              {tab === 'paste' && !importPreview && (<div className="space-y-3"><textarea value={pt} onChange={e => { setPt(e.target.value); setPtErr('') }} placeholder={SAMPLE_JSON} rows={12} className={`w-full px-3 py-2 bg-dark-700 border rounded-lg text-sm text-dark-100 placeholder:text-dark-500 focus:outline-none transition-colors font-mono resize-none ${ptErr ? 'border-breakout focus:border-breakout' : 'border-dark-600 focus:border-accent'}`} />{ptErr && <div className="p-3 rounded-lg bg-breakout/15 border border-breakout text-breakout text-sm">{ptErr}</div>}</div>)}
               {tab === 'file' && !importPreview && (
                 <div className="space-y-3">
                   <input ref={fir} type="file" accept=".json,.txt" onChange={hFC} className="hidden" />
                   <div onClick={() => fir.current?.click()} onDrop={hDrop} onDragOver={e => e.preventDefault()} className="border-2 border-dashed border-dark-600 hover:border-accent rounded-xl p-8 text-center cursor-pointer transition-colors"><Upload className="w-10 h-10 text-dark-400 mx-auto mb-3" /><p className="text-sm text-dark-300 mb-1">点击或拖拽文件到此处</p><p className="text-xs text-dark-500">支持 .json / .txt 格式</p></div>
-                  {fn && (<div className={`p-3 rounded-lg border ${fErr ? 'bg-breakout/10 border-breakout' : 'bg-dark-700 border-dark-600'}`}><p className="text-sm text-dark-200">已选择：{fn}</p>{fc && <p className="text-xs text-dark-400 mt-1 truncate">预览：{fc.slice(0, 120)}...</p>}{fErr && <p className="text-sm text-breakout mt-1">{fErr}</p>}</div>)}
+                  {fn && (<div className={`p-3 rounded-lg border ${fErr ? 'bg-breakout/10 border-breakout' : 'bg-dark-700 border-dark-600'}`}><p className="text-sm text-dark-200">已选择：{fn}</p>{fc && <p className="text-xs text-dark-400 mt-1 truncate">预览：{fc.slice(0, 120)}...</p>}{fErr && <div className="mt-2 p-2 rounded bg-breakout/15 border border-breakout text-breakout text-sm">{fErr}</div>}</div>)}
                 </div>
               )}
               {importPreview && (tab === 'paste' || tab === 'file') && (
                 <div className="space-y-4">
+                  {!validation.valid && validation.reasons.length > 0 && (
+                    <div className="p-3 rounded-lg bg-breakout/15 border border-breakout text-breakout text-sm">
+                      <div className="font-semibold mb-1">请完成必填字段映射：</div>
+                      <ul className="list-disc list-inside space-y-0.5">{validation.reasons.map((r, i) => <li key={i}>{r}</li>)}</ul>
+                    </div>
+                  )}
                   <div className="flex items-center justify-between"><h3 className="text-sm font-semibold text-dark-100">字段匹配预览</h3><button onClick={remap} className="flex items-center gap-1 text-xs text-accent hover:text-accent-dim transition-colors"><RefreshCw className="w-3 h-3" />自动匹配</button></div>
                   <div className="grid grid-cols-4 gap-4 text-xs text-dark-400 pb-2 border-b border-dark-600"><div>项目信息 ({previewCounts.project}字段)</div><div>时间线 ({previewCounts.events}条)</div><div>观点 ({previewCounts.opinions}条)</div><div>素材 ({previewCounts.materials}条)</div></div>
                   <div className="max-h-64 overflow-y-auto space-y-0.5">
-                    {importPreview.fieldMappings.map((field, idx) => (
-                      <div key={idx} className={`grid grid-cols-12 gap-2 p-2 items-center text-xs ${idx % 2 === 0 ? 'bg-dark-800' : 'bg-dark-700/50'}`}>
-                        <div className="col-span-3 font-mono text-dark-200 truncate" title={field.sourceKey}>{field.sourceKey}</div>
-                        <div className="col-span-2 text-dark-400 truncate" title={field.sampleValue}>{field.sampleValue || '-'}</div>
-                        <div className="col-span-3">
-                          <select value={field.userTarget} onChange={e => updateFieldMapping(field.sourceKey, { userTarget: e.target.value as ImportTargetType })} className={`w-full px-2 py-1 bg-dark-700 border border-dark-600 rounded text-xs text-dark-100 focus:outline-none focus:border-accent ${field.userTarget !== field.suggestedTarget ? '' : 'ring-1 ring-accent/30'}`}>
-                            {(['ignore', 'event', 'opinion', 'material'] as ImportTargetType[]).map(t => (<option key={t} value={t}>{t === 'ignore' ? '项目字段' : IMPORT_TARGET_LABELS[t]}</option>))}
-                          </select>
+                    {importPreview.fieldMappings.map((field, idx) => {
+                      const isMissing = isFieldRowMissingRequired(field)
+                      return (
+                        <div key={idx} className={`grid grid-cols-12 gap-2 p-2 items-center text-xs ${idx % 2 === 0 ? 'bg-dark-800' : 'bg-dark-700/50'} ${isMissing ? 'ring-1 ring-breakout rounded' : ''}`}>
+                          <div className="col-span-3 font-mono text-dark-200 truncate" title={field.sourceKey}>{field.sourceKey}</div>
+                          <div className="col-span-2 text-dark-400 truncate" title={field.sampleValue}>{field.sampleValue || '-'}</div>
+                          <div className="col-span-3">
+                            <select value={field.userTarget} onChange={e => updateFieldMapping(field.sourceKey, { userTarget: e.target.value as ImportTargetType })} className={`w-full px-2 py-1 bg-dark-700 border border-dark-600 rounded text-xs text-dark-100 focus:outline-none focus:border-accent ${field.userTarget !== field.suggestedTarget ? '' : 'ring-1 ring-accent/30'}`}>
+                              {(['ignore', 'event', 'opinion', 'material'] as ImportTargetType[]).map(t => (<option key={t} value={t}>{t === 'ignore' ? '项目字段' : IMPORT_TARGET_LABELS[t]}</option>))}
+                            </select>
+                          </div>
+                          <div className="col-span-4 flex items-center gap-1">
+                            {field.userTarget === 'ignore' && field.userField === 'name' && <span className="text-breakout shrink-0">*</span>}
+                            <select value={field.userField || ''} onChange={e => updateFieldMapping(field.sourceKey, { userField: e.target.value || null })} className={`flex-1 px-2 py-1 bg-dark-700 border rounded text-xs text-dark-100 focus:outline-none focus:border-accent ${isMissing ? 'border-breakout' : 'border-dark-600'}`}>
+                              <option value="">忽略</option>
+                              {FIELD_OPTS[field.userTarget].map(f => <option key={f} value={f}>{f}</option>)}
+                            </select>
+                          </div>
                         </div>
-                        <div className="col-span-4 flex items-center gap-1">
-                          {field.sourceKey === 'project.name' && field.userTarget === 'ignore' && <span className="text-breakout">*</span>}
-                          <select value={field.userField || ''} onChange={e => updateFieldMapping(field.sourceKey, { userField: e.target.value || null })} className="flex-1 px-2 py-1 bg-dark-700 border border-dark-600 rounded text-xs text-dark-100 focus:outline-none focus:border-accent">
-                            <option value="">忽略</option>
-                            {FIELD_OPTS[field.userTarget].map(f => <option key={f} value={f}>{f}</option>)}
-                          </select>
-                        </div>
-                      </div>
-                    ))}
+                      )
+                    })}
                   </div>
                 </div>
               )}
@@ -303,7 +381,7 @@ export default function ProjectList() {
                     <div><label className="block text-xs text-dark-400 mb-1">活动类型</label><select value={fp.activityType} onChange={e => setFp({ ...fp, activityType: e.target.value as typeof ACTIVITY_TYPES[number] })} className="w-full px-2.5 py-1.5 bg-dark-700 border border-dark-600 rounded text-sm text-dark-100 focus:outline-none focus:border-accent">{ACTIVITY_TYPES.map(t => <option key={t}>{t}</option>)}</select></div>
                     <div className="grid grid-cols-2 gap-2"><div><label className="block text-xs text-dark-400 mb-1">开始</label><input type="date" value={fp.startDate} onChange={e => setFp({ ...fp, startDate: e.target.value })} className="w-full px-2.5 py-1.5 bg-dark-700 border border-dark-600 rounded text-sm text-dark-100 focus:outline-none focus:border-accent" /></div><div><label className="block text-xs text-dark-400 mb-1">结束</label><input type="date" value={fp.endDate} onChange={e => setFp({ ...fp, endDate: e.target.value })} className="w-full px-2.5 py-1.5 bg-dark-700 border border-dark-600 rounded text-sm text-dark-100 focus:outline-none focus:border-accent" /></div></div>
                   </div>
-                  {([{ title: '时间线节点', rows: ers, setRows: setErs, mk: eER, cols: [{ k: 'timestamp', t: 'datetime-local', p: '时间', c: 2 }, { k: 'title', t: 'text', p: '标题', c: 2 }, { k: 'content', t: 'text', p: '内容', c: 3 }, { k: 'nodeType', t: 'select', opts: NODE_TYPES.map(v => ({ v, l: NL[v] })), c: 1 }, { k: 'sentiment', t: 'select', opts: SENTIMENTS.map(v => ({ v, l: SL[v] })), c: 1 }, { k: 'spreadCount', t: 'number', p: '传播量', c: 1 }, { k: 'sourceAuthor', t: 'text', p: '作者', c: 1 }, { k: 'role', t: 'select', opts: ROLE_TYPES.map(v => ({ v, l: RL[v] })), c: 1 }], mh: 'max-h-64' }, { title: '观点', rows: ors, setRows: setOrs, mk: eOR, cols: [{ k: 'role', t: 'select', opts: ROLE_TYPES.map(v => ({ v, l: RL[v] })), c: 2 }, { k: 'content', t: 'text', p: '内容', c: 5 }, { k: 'author', t: 'text', p: '作者', c: 2 }, { k: 'platform', t: 'text', p: '平台', c: 2 }, { k: 'sentiment', t: 'select', opts: SENTIMENTS.map(v => ({ v, l: SL[v] })), c: 1 }], mh: 'max-h-56' }, { title: '复盘素材', rows: mrs, setRows: setMrs, mk: eMR, cols: [{ k: 'type', t: 'select', opts: MATERIAL_TYPES.map(v => ({ v, l: ML[v] })), c: 2 }, { k: 'title', t: 'text', p: '标题', c: 3 }, { k: 'content', t: 'text', p: '内容', c: 6 }], mh: 'max-h-48' }] as any[]).map((sec: any, si: number) => (
+                  {FORM_SECTIONS.map((sec: any, si: number) => (
                     <div key={si}>
                       <div className="flex items-center justify-between mb-2"><h3 className="text-sm font-semibold text-dark-200">{sec.title}</h3><button onClick={() => sec.setRows([...sec.rows, sec.mk()])} className="text-xs text-accent hover:text-accent-dim flex items-center gap-0.5"><Plus className="w-3 h-3" />添加行</button></div>
                       <div className={`${sec.mh} overflow-y-auto border border-dark-600 rounded-lg divide-y divide-dark-600`}>
@@ -324,10 +402,38 @@ export default function ProjectList() {
             </div>
             <div className="flex justify-end gap-3 px-6 py-4 border-t border-dark-600">
               {importPreview && (tab === 'paste' || tab === 'file') ? (
-                <><button onClick={cancelPreview} className="px-4 py-2 text-sm text-dark-300 hover:text-dark-100 transition-colors">取消</button><button onClick={confirmImport} disabled={!canConfirm} className="px-6 py-2 text-sm bg-accent hover:bg-accent-dim text-dark-900 font-medium rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed">确认导入</button></>
+                <><button onClick={cancelPreview} className="px-4 py-2 text-sm text-dark-300 hover:text-dark-100 transition-colors">取消</button><button onClick={confirmImport} disabled={!canConfirmBtn} className={`px-6 py-2 text-sm font-medium rounded-lg transition-colors ${canConfirmBtn ? 'bg-accent hover:bg-accent-dim text-dark-900' : 'bg-dark-600 text-dark-400 cursor-not-allowed'}`}>{confirmBtnText}</button></>
               ) : (
-                <><button onClick={() => setShowImp(false)} className="px-4 py-2 text-sm text-dark-300 hover:text-dark-100 transition-colors">取消</button>{tab === 'paste' && <button onClick={hPaste} disabled={!pt.trim()} className="px-4 py-2 text-sm bg-accent hover:bg-accent-dim text-dark-900 font-medium rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed">解析并预览</button>}{tab === 'file' && <button onClick={hFile} disabled={!fc.trim()} className="px-4 py-2 text-sm bg-accent hover:bg-accent-dim text-dark-900 font-medium rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed">解析并预览</button>}{tab === 'form' && <button onClick={hForm} className="px-4 py-2 text-sm bg-accent hover:bg-accent-dim text-dark-900 font-medium rounded-lg transition-colors">导入并进入</button>}</>
+                <><button onClick={() => setShowImp(false)} className="px-4 py-2 text-sm text-dark-300 hover:text-dark-100 transition-colors">取消</button>{tab === 'paste' && <button onClick={hPaste} disabled={!pt.trim()} className="px-4 py-2 text-sm bg-accent hover:bg-accent-dim text-dark-900 font-medium rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed">解析并预览</button>}{tab === 'file' && <button onClick={hFile} disabled={!fc.trim()} className="px-4 py-2 text-sm bg-accent hover:bg-accent-dim text-dark-900 font-medium rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed">解析并预览</button>}{tab === 'form' && <button onClick={hForm} disabled={!fp.name.trim()} className="px-4 py-2 text-sm bg-accent hover:bg-accent-dim text-dark-900 font-medium rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed">导入并进入</button>}</>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+      {showSum && importSummary && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 backdrop-blur-sm p-4">
+          <div className="glass-panel rounded-2xl p-6 w-full max-w-md mx-4">
+            <div className="text-center mb-5">
+              <div className="w-14 h-14 mx-auto mb-3 rounded-full bg-success/20 flex items-center justify-center">
+                <CheckCircle className="w-8 h-8 text-success" />
+              </div>
+              <h2 className="text-xl font-bold text-dark-100">导入成功</h2>
+            </div>
+            <div className="space-y-3 mb-6">
+              <div className="grid grid-cols-2 gap-3 text-sm items-center">
+                <div className="text-dark-400 flex items-center gap-1.5"><Database className="w-3.5 h-3.5" />项目名称</div>
+                <div className="text-dark-100 font-medium truncate text-right">{lastProjName}</div>
+              </div>
+              <div className="h-px bg-dark-600" />
+              <div className="grid grid-cols-2 gap-3 text-sm items-center"><div className="text-dark-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5 text-success" />时间线节点</div><div className="text-success font-semibold text-right">{importSummary.events}条</div></div>
+              <div className="grid grid-cols-2 gap-3 text-sm items-center"><div className="text-dark-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5 text-success" />观点条目</div><div className="text-success font-semibold text-right">{importSummary.opinions}条</div></div>
+              <div className="grid grid-cols-2 gap-3 text-sm items-center"><div className="text-dark-400 flex items-center gap-1.5"><CheckCircle className="w-3.5 h-3.5 text-success" />复盘素材</div><div className="text-success font-semibold text-right">{importSummary.materials}条</div></div>
+              <div className="h-px bg-dark-600" />
+              <div className="grid grid-cols-2 gap-3 text-sm items-center"><div className="text-dark-400">总计导入</div><div className="text-accent font-bold text-right">{importSummary.events + importSummary.opinions + importSummary.materials} 条数据</div></div>
+            </div>
+            <div className="flex flex-col gap-2">
+              <button onClick={closeSumAndNav} className="w-full px-4 py-2.5 text-sm bg-accent hover:bg-accent-dim text-dark-900 font-medium rounded-lg transition-colors">进入项目查看</button>
+              <button onClick={closeSumAndStay} className="w-full px-4 py-2.5 text-sm bg-dark-700 hover:bg-dark-600 text-dark-100 font-medium rounded-lg transition-colors border border-dark-600">留在这里，继续导入</button>
             </div>
           </div>
         </div>

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Project, TimelineEvent, OpinionItem, ReportMaterial, RoleType, SentimentType, ReportTemplateType, ReportDraft, ImportTargetType, ImportFieldPreview, ImportPreviewData, OpinionFilterState } from '@/types'
+import type { Project, TimelineEvent, OpinionItem, ReportMaterial, RoleType, SentimentType, ReportTemplateType, ReportDraft, ImportTargetType, ImportFieldPreview, ImportPreviewData, OpinionFilterState, InsertedInsight, OpinionInsight } from '@/types'
 import { REPORT_TEMPLATES } from '@/types'
 import { mockProjects, mockTimelineEvents, mockOpinionItems, mockReportMaterials } from '@/data/mockData'
 
@@ -28,6 +28,10 @@ interface StoreState {
   reportDrafts: ReportDraft[]
   currentDraftId: string | null
   importPreview: ImportPreviewData | null
+  insertedInsights: InsertedInsight[]
+  importSummary: { events: number; opinions: number; materials: number } | null
+  manualAnalysisText: string
+  viewDraftId: string | null
 
   setCurrentProject: (id: string | null) => void
   addProject: (project: Project) => void
@@ -62,6 +66,13 @@ interface StoreState {
   setImportPreview: (preview: ImportPreviewData | null) => void
   updateFieldMapping: (sourceKey: string, updates: Partial<ImportFieldPreview>) => void
   generateOpinionInsights: (projectId: string, filteredOpinions?: OpinionItem[]) => Record<RoleType, { demands: string[]; risks: string[]; suggestions: string[] }>
+  getDraftsByProject: (projectId: string) => ReportDraft[]
+  switchToDraft: (draftId: string) => void
+  clearViewDraft: () => void
+  deleteDraftById: (draftId: string) => void
+  setManualAnalysis: (text: string) => void
+  addInsertedInsights: (insights: InsertedInsight[]) => void
+  setImportSummary: (summary: { events: number; opinions: number; materials: number } | null) => void
 }
 
 function loadPersistedState(): Partial<StoreState> | null {
@@ -84,7 +95,6 @@ function persistState(state: StoreState) {
       reportMaterials: state.reportMaterials,
       selectedFilters: state.selectedFilters,
       activeRoleFilters: state.activeRoleFilters,
-      reportGeneratedAt: state.reportGeneratedAt,
       reportDrafts: state.reportDrafts,
       currentReportTemplate: state.currentReportTemplate,
     }
@@ -94,7 +104,7 @@ function persistState(state: StoreState) {
 }
 
 function generateId(): string {
-  return Date.now().toString(36) + Math.random().toString(36).substr(2)
+  return `dr-${Date.now()}-${Math.floor(Math.random() * 1000)}`
 }
 
 const persisted = loadPersistedState()
@@ -110,11 +120,15 @@ export const useStore = create<StoreState>((set, get) => ({
   opinionPanelOpen: false,
   selectedEventId: null,
   opinionFilter: { sentiment: 'all', platform: '', confirmed: 'all' },
-  reportGeneratedAt: persisted?.reportGeneratedAt ?? null,
+  reportGeneratedAt: null,
   currentReportTemplate: persisted?.currentReportTemplate ?? 'internal',
   reportDrafts: persisted?.reportDrafts ?? [],
   currentDraftId: null,
   importPreview: null,
+  manualAnalysisText: '',
+  insertedInsights: [],
+  viewDraftId: null,
+  importSummary: null,
 
   setCurrentProject: (id) => set({ currentProjectId: id }),
 
@@ -275,11 +289,19 @@ export const useStore = create<StoreState>((set, get) => ({
       reportMaterials: mockReportMaterials,
       selectedFilters: { status: 'all', sortBy: 'date' },
       activeRoleFilters: [],
+      opinionPanelOpen: false,
+      selectedEventId: null,
+      opinionFilter: { sentiment: 'all', platform: '', confirmed: 'all' },
       reportGeneratedAt: null,
       currentReportTemplate: 'internal',
       reportDrafts: [],
       currentDraftId: null,
       importPreview: null,
+      manualAnalysisText: '',
+      insertedInsights: [],
+      viewDraftId: null,
+      importSummary: null,
+      currentProjectId: null,
     })
   },
 
@@ -290,13 +312,29 @@ export const useStore = create<StoreState>((set, get) => ({
   }),
 
   saveReportDraft: (draft) => {
+    const state = get()
+    const projectDrafts = state.reportDrafts.filter((d) => d.projectId === draft.projectId)
+    const maxVersion = projectDrafts.length > 0 ? Math.max(...projectDrafts.map((d) => d.versionNumber)) : 0
+    const versionNumber = maxVersion + 1
     const id = generateId()
-    const newDraft: ReportDraft = { ...draft, id }
-    set((state) => {
-      const next = { reportDrafts: [...state.reportDrafts, newDraft] }
-      persistState({ ...state, ...next })
+    const insertedInsightsSection = JSON.stringify(state.insertedInsights)
+    const newDraft: ReportDraft = {
+      ...draft,
+      id,
+      versionNumber,
+      manualAnalysis: state.manualAnalysisText,
+      insertedInsightsSection,
+    }
+    set((s) => {
+      const next = {
+        reportDrafts: [...s.reportDrafts, newDraft],
+        viewDraftId: id,
+        currentDraftId: id,
+      }
+      persistState({ ...s, ...next })
       return next
     })
+    get().markReportGenerated()
     return id
   },
 
@@ -398,4 +436,79 @@ export const useStore = create<StoreState>((set, get) => ({
 
     return result
   },
+
+  getDraftsByProject: (projectId) => {
+    return get().reportDrafts
+      .filter((d) => d.projectId === projectId)
+      .sort((a, b) => b.versionNumber - a.versionNumber)
+  },
+
+  switchToDraft: (draftId) => {
+    const state = get()
+    const draft = state.reportDrafts.find((d) => d.id === draftId)
+    if (!draft) return
+    const materials = state.reportMaterials.filter((m) => m.projectId === draft.projectId)
+    const setMatSel = state.setMaterialSelected
+    materials.forEach((m) => {
+      const shouldSelect = draft.materialIds.includes(m.id)
+      if (m.selected !== shouldSelect) setMatSel(m.id, shouldSelect)
+    })
+    state.setCurrentReportTemplate(draft.template)
+    state.markReportGenerated()
+    let parsedInsights: InsertedInsight[] = []
+    if (draft.insertedInsightsSection) {
+      try {
+        parsedInsights = JSON.parse(draft.insertedInsightsSection)
+      } catch {
+        parsedInsights = []
+      }
+    }
+    set({
+      manualAnalysisText: draft.manualAnalysis || '',
+      insertedInsights: parsedInsights,
+      viewDraftId: draftId,
+    })
+  },
+
+  clearViewDraft: () => set({
+    viewDraftId: null,
+    manualAnalysisText: '',
+    insertedInsights: [],
+  }),
+
+  deleteDraftById: (draftId) => {
+    const state = get()
+    const wasViewing = state.viewDraftId === draftId
+    const wasCurrent = state.currentDraftId === draftId
+    set((s) => {
+      const next = {
+        reportDrafts: s.reportDrafts.filter((d) => d.id !== draftId),
+        currentDraftId: wasCurrent ? null : s.currentDraftId,
+        viewDraftId: wasViewing ? null : s.viewDraftId,
+        manualAnalysisText: wasViewing ? '' : s.manualAnalysisText,
+        insertedInsights: wasViewing ? [] : s.insertedInsights,
+      }
+      persistState({ ...s, ...next })
+      return next
+    })
+  },
+
+  setManualAnalysis: (text) => set({ manualAnalysisText: text }),
+
+  addInsertedInsights: (insights) => set((state) => {
+    const merged = [...state.insertedInsights]
+    for (const insight of insights) {
+      const existingIdx = merged.findIndex((i) => i.role === insight.role)
+      if (existingIdx >= 0) {
+        merged[existingIdx] = insight
+      } else {
+        merged.push(insight)
+      }
+    }
+    const next = { insertedInsights: merged }
+    persistState({ ...state, ...next })
+    return next
+  }),
+
+  setImportSummary: (summary) => set({ importSummary: summary }),
 }))

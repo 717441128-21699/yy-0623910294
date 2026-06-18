@@ -49,7 +49,20 @@ export interface ImportPreviewData {
   fieldMappings: ImportFieldPreview[]
 }
 
+export interface ImportSummary {
+  events: number
+  opinions: number
+  materials: number
+}
+
 export interface OpinionInsight {
+  role: RoleType
+  demands: string[]
+  risks: string[]
+  suggestions: string[]
+}
+
+export interface InsertedInsight {
   role: RoleType
   demands: string[]
   risks: string[]
@@ -71,6 +84,9 @@ export interface ReportDraft {
   generatedAt: string
   outlineText: string
   materialIds: string[]
+  versionNumber: number
+  manualAnalysis: string
+  insertedInsightsSection: string
 }
 
 export interface Project {
